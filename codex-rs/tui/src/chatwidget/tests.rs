@@ -360,6 +360,7 @@ async fn interrupted_turn_restores_queued_messages_with_images_and_elements() {
         }],
         text_elements: first_elements,
         mention_paths: HashMap::new(),
+        collaboration_mode_override: None,
     });
     chat.queued_user_messages.push_back(UserMessage {
         text: second_text,
@@ -369,6 +370,7 @@ async fn interrupted_turn_restores_queued_messages_with_images_and_elements() {
         }],
         text_elements: second_elements,
         mention_paths: HashMap::new(),
+        collaboration_mode_override: None,
     });
     chat.refresh_queued_user_messages();
 
@@ -449,6 +451,7 @@ async fn remap_placeholders_uses_attachment_labels() {
         text_elements: elements,
         local_images: attachments,
         mention_paths: HashMap::new(),
+        collaboration_mode_override: None,
     };
     let mut next_label = 3usize;
     let remapped = remap_placeholders_for_message(message, &mut next_label);
@@ -510,6 +513,7 @@ async fn remap_placeholders_uses_byte_ranges_when_placeholder_missing() {
         text_elements: elements,
         local_images: attachments,
         mention_paths: HashMap::new(),
+        collaboration_mode_override: None,
     };
     let mut next_label = 3usize;
     let remapped = remap_placeholders_for_message(message, &mut next_label);
@@ -1241,7 +1245,51 @@ async fn submit_user_message_with_mode_sets_coding_collaboration_mode() {
 }
 
 #[tokio::test]
-async fn submit_user_message_with_mode_queues_when_plan_generation_is_in_progress() {
+async fn submit_user_message_with_mode_queues_while_plan_stream_is_active() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+    let plan_mask =
+        collaboration_modes::mask_for_kind(chat.models_manager.as_ref(), ModeKind::Plan)
+            .expect("expected plan collaboration mask");
+    chat.set_collaboration_mask(plan_mask);
+    chat.on_task_started();
+    chat.on_plan_delta("- Step 1".to_string());
+
+    let code_mode = collaboration_modes::code_mask(chat.models_manager.as_ref())
+        .expect("expected code collaboration mode");
+    chat.submit_user_message_with_mode("Implement the plan.".to_string(), code_mode);
+
+    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Plan);
+    assert_eq!(chat.queued_user_messages.len(), 1);
+    assert_eq!(
+        chat.queued_user_messages.front().unwrap().text,
+        "Implement the plan."
+    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+
+    chat.on_task_complete(None, false);
+
+    assert!(chat.queued_user_messages.is_empty());
+    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Code);
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn {
+            collaboration_mode:
+                Some(CollaborationMode {
+                    mode: ModeKind::Code,
+                    ..
+                }),
+            personality: None,
+            ..
+        } => {}
+        other => {
+            panic!("expected Op::UserTurn with code collab mode, got {other:?}")
+        }
+    }
+}
+
+#[tokio::test]
+async fn submit_user_message_with_mode_submits_when_plan_stream_is_not_active() {
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
     chat.thread_id = Some(ThreadId::new());
     chat.set_feature_enabled(Feature::CollaborationModes, true);
@@ -1251,17 +1299,26 @@ async fn submit_user_message_with_mode_queues_when_plan_generation_is_in_progres
     chat.set_collaboration_mask(plan_mask);
     chat.on_task_started();
 
-    let default_mode = collaboration_modes::default_mode_mask(chat.models_manager.as_ref())
-        .expect("expected default collaboration mode");
-    chat.submit_user_message_with_mode("Implement the plan.".to_string(), default_mode);
+    let code_mode = collaboration_modes::code_mask(chat.models_manager.as_ref())
+        .expect("expected code collaboration mode");
+    chat.submit_user_message_with_mode("Implement the plan.".to_string(), code_mode);
 
-    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Default);
-    assert_eq!(chat.queued_user_messages.len(), 1);
-    assert_eq!(
-        chat.queued_user_messages.front().unwrap().text,
-        "Implement the plan."
-    );
-    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Code);
+    assert!(chat.queued_user_messages.is_empty());
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn {
+            collaboration_mode:
+                Some(CollaborationMode {
+                    mode: ModeKind::Code,
+                    ..
+                }),
+            personality: None,
+            ..
+        } => {}
+        other => {
+            panic!("expected Op::UserTurn with code collab mode, got {other:?}")
+        }
+    }
 }
 
 #[tokio::test]
@@ -1811,7 +1868,32 @@ async fn streaming_final_answer_keeps_task_running_state() {
 }
 
 #[tokio::test]
-async fn steer_enter_queues_while_plan_generation_is_in_progress() {
+async fn steer_enter_queues_while_plan_stream_is_active() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+    let plan_mask =
+        collaboration_modes::mask_for_kind(chat.models_manager.as_ref(), ModeKind::Plan)
+            .expect("expected plan collaboration mask");
+    chat.set_collaboration_mask(plan_mask);
+    chat.on_task_started();
+    chat.on_plan_delta("- Step 1".to_string());
+
+    chat.bottom_pane
+        .set_composer_text("queued submission".to_string(), Vec::new(), Vec::new());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Plan);
+    assert_eq!(chat.queued_user_messages.len(), 1);
+    assert_eq!(
+        chat.queued_user_messages.front().unwrap().text,
+        "queued submission"
+    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn steer_enter_submits_when_plan_stream_is_not_active() {
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
     chat.thread_id = Some(ThreadId::new());
     chat.set_feature_enabled(Feature::CollaborationModes, true);
@@ -1822,15 +1904,16 @@ async fn steer_enter_queues_while_plan_generation_is_in_progress() {
     chat.on_task_started();
 
     chat.bottom_pane
-        .set_composer_text("queued submission".to_string(), Vec::new(), Vec::new());
+        .set_composer_text("submitted immediately".to_string(), Vec::new(), Vec::new());
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-    assert_eq!(chat.queued_user_messages.len(), 1);
-    assert_eq!(
-        chat.queued_user_messages.front().unwrap().text,
-        "queued submission"
-    );
-    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    assert!(chat.queued_user_messages.is_empty());
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn {
+            personality: None, ..
+        } => {}
+        other => panic!("expected Op::UserTurn, got {other:?}"),
+    }
 }
 
 #[tokio::test]

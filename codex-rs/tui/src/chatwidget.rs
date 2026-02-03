@@ -606,6 +606,7 @@ pub(crate) struct UserMessage {
     local_images: Vec<LocalImageAttachment>,
     text_elements: Vec<TextElement>,
     mention_paths: HashMap<String, String>,
+    collaboration_mode_override: Option<CollaborationModeMask>,
 }
 
 impl From<String> for UserMessage {
@@ -616,6 +617,7 @@ impl From<String> for UserMessage {
             // Plain text conversion has no UI element ranges.
             text_elements: Vec::new(),
             mention_paths: HashMap::new(),
+            collaboration_mode_override: None,
         }
     }
 }
@@ -628,6 +630,7 @@ impl From<&str> for UserMessage {
             // Plain text conversion has no UI element ranges.
             text_elements: Vec::new(),
             mention_paths: HashMap::new(),
+            collaboration_mode_override: None,
         }
     }
 }
@@ -654,6 +657,7 @@ pub(crate) fn create_initial_user_message(
             local_images,
             text_elements,
             mention_paths: HashMap::new(),
+            collaboration_mode_override: None,
         })
     }
 }
@@ -668,6 +672,7 @@ fn remap_placeholders_for_message(message: UserMessage, next_label: &mut usize) 
         text_elements,
         local_images,
         mention_paths,
+        collaboration_mode_override,
     } = message;
     if local_images.is_empty() {
         return UserMessage {
@@ -675,6 +680,7 @@ fn remap_placeholders_for_message(message: UserMessage, next_label: &mut usize) 
             text_elements,
             local_images,
             mention_paths,
+            collaboration_mode_override,
         };
     }
 
@@ -730,6 +736,7 @@ fn remap_placeholders_for_message(message: UserMessage, next_label: &mut usize) 
         local_images: remapped_images,
         text_elements: rebuilt_elements,
         mention_paths,
+        collaboration_mode_override,
     }
 }
 
@@ -1436,6 +1443,7 @@ impl ChatWidget {
             text_elements: self.bottom_pane.composer_text_elements(),
             local_images: self.bottom_pane.composer_local_images(),
             mention_paths: HashMap::new(),
+            collaboration_mode_override: None,
         };
 
         let mut to_merge: Vec<UserMessage> = self.queued_user_messages.drain(..).collect();
@@ -1448,6 +1456,7 @@ impl ChatWidget {
             text_elements: Vec::new(),
             local_images: Vec::new(),
             mention_paths: HashMap::new(),
+            collaboration_mode_override: None,
         };
         let mut combined_offset = 0usize;
         let mut next_image_label = 1usize;
@@ -2711,8 +2720,9 @@ impl ChatWidget {
                             .take_recent_submission_images_with_placeholders(),
                         text_elements,
                         mention_paths: self.bottom_pane.take_mention_paths(),
+                        collaboration_mode_override: None,
                     };
-                    if self.is_session_configured() && !self.is_plan_generation_in_progress() {
+                    if self.is_session_configured() && !self.is_plan_streaming_in_tui() {
                         // Submitted is only emitted when steer is enabled.
                         // Reset any reasoning header only when we are actually submitting a turn.
                         self.reasoning_buffer.clear();
@@ -2734,6 +2744,7 @@ impl ChatWidget {
                             .take_recent_submission_images_with_placeholders(),
                         text_elements,
                         mention_paths: self.bottom_pane.take_mention_paths(),
+                        collaboration_mode_override: None,
                     };
                     self.queue_user_message(user_message);
                 }
@@ -3084,6 +3095,7 @@ impl ChatWidget {
                         .take_recent_submission_images_with_placeholders(),
                     text_elements: prepared_elements,
                     mention_paths: self.bottom_pane.take_mention_paths(),
+                    collaboration_mode_override: None,
                 };
                 if self.is_session_configured() {
                     self.reasoning_buffer.clear();
@@ -3221,6 +3233,7 @@ impl ChatWidget {
             local_images,
             text_elements,
             mention_paths,
+            collaboration_mode_override,
         } = user_message;
         if text.is_empty() && local_images.is_empty() {
             return;
@@ -3287,6 +3300,9 @@ impl ChatWidget {
             }
         }
 
+        if let Some(mask) = collaboration_mode_override {
+            self.set_collaboration_mask(mask);
+        }
         let effective_mode = self.effective_collaboration_mode();
         let collaboration_mode = if self.collaboration_modes_enabled() {
             self.active_collaboration_mask
@@ -5783,8 +5799,8 @@ impl ChatWidget {
         self.bottom_pane.is_task_running() || self.is_review_mode
     }
 
-    fn is_plan_generation_in_progress(&self) -> bool {
-        self.agent_turn_running && self.active_mode_kind() == ModeKind::Plan
+    fn is_plan_streaming_in_tui(&self) -> bool {
+        self.plan_stream_controller.is_some()
     }
 
     pub(crate) fn composer_is_empty(&self) -> bool {
@@ -5796,12 +5812,18 @@ impl ChatWidget {
         text: String,
         collaboration_mode: CollaborationModeMask,
     ) {
-        let should_queue = self.is_plan_generation_in_progress();
-        self.set_collaboration_mask(collaboration_mode);
+        let should_queue = self.is_plan_streaming_in_tui();
+        let user_message = UserMessage {
+            text,
+            local_images: Vec::new(),
+            text_elements: Vec::new(),
+            mention_paths: HashMap::new(),
+            collaboration_mode_override: Some(collaboration_mode),
+        };
         if should_queue {
-            self.queue_user_message(text.into());
+            self.queue_user_message(user_message);
         } else {
-            self.submit_user_message(text.into());
+            self.submit_user_message(user_message);
         }
     }
 
