@@ -115,6 +115,9 @@ if [[ "${1:-}" == --build ]]; then
   /usr/bin/cargo fetch "${fetch_options[@]}" --target "$target"
   /usr/bin/cargo fetch "${fetch_options[@]}" \
     --manifest-path /usr/lib/rustlib/src/rust/library/Cargo.toml
+  # sccache hashes CARGO_* variables: both measured builds must match exactly.
+  # Cold hydration may download, but compilation needs only the hydrated inputs.
+  export CARGO_NET_OFFLINE=true
   cat /proc/self/cgroup > /bench/container-cgroup.txt
   ps -eo pid,ppid,args > /bench/processes-before.txt
   status=0
