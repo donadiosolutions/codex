@@ -105,10 +105,6 @@ if [[ "${1:-}" == --build ]]; then
   export RUSTY_V8_ARCHIVE="$binding_dir/$archive"
   export RUSTY_V8_SRC_BINDING_PATH="$binding_dir/$binding"
 
-  printf 'pub fn flags_probe() -> u64 { 42 }\n' > /bench/probe/probe.rs
-  read -r -a flags <<< "$RUSTFLAGS"
-  sccache /usr/bin/rustc "${flags[@]}" --crate-name flags_probe --crate-type rlib \
-    --emit link --out-dir /bench/probe /bench/probe/probe.rs
   cd /src/codex-rs
   fetch_options=(--locked)
   if [[ "$phase" == hot ]]; then fetch_options+=(--offline); fi
@@ -118,6 +114,15 @@ if [[ "${1:-}" == --build ]]; then
   # sccache hashes CARGO_* variables: both measured builds must match exactly.
   # Cold hydration may download, but compilation needs only the hydrated inputs.
   export CARGO_NET_OFFLINE=true
+  printf 'pub fn flags_probe() -> u64 { 42 }\n' > /bench/probe/probe.rs
+  read -r -a flags <<< "$RUSTFLAGS"
+  sccache /usr/bin/rustc "${flags[@]}" --crate-name flags_probe --crate-type rlib \
+    --emit link --out-dir /bench/probe /bench/probe/probe.rs
+  sccache --show-stats --stats-format json > /bench/cache-probe.json
+  if [[ "$phase" == hot ]]; then
+    python3 -c 'import json; s = json.load(open("/bench/cache-probe.json")); assert s["stats"]["cache_hits"]["counts"].get("Rust", 0) > 0, "Hot compiler cache probe missed"'
+    echo 'Persistent Rust cache probe hit; starting measured hot build.'
+  fi
   cat /proc/self/cgroup > /bench/container-cgroup.txt
   ps -eo pid,ppid,args > /bench/processes-before.txt
   status=0
