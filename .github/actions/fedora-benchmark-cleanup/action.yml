@@ -1,0 +1,7 @@
+name: Fedora benchmark post-job cleanup
+description: Remove transient Cargo output before the persistent input disk is snapshotted.
+runs:
+  using: node24
+  main: main.cjs
+  post: post.cjs
+  post-if: always()

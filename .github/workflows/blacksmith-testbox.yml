@@ -1,79 +1,58 @@
-name: Codex build Testbox
+name: Fedora Codex build benchmark
 
 on:
   workflow_dispatch:
     inputs:
-      testbox_id:
-        description: Blacksmith Testbox session ID
+      cache_key:
+        description: Sticky disk key (use a new key for cold, reuse it for hot)
         required: true
+        default: codex-fedora44-build-v2
         type: string
+      cache_state:
+        description: Label for the benchmark result
+        required: true
+        default: cold
+        type: choice
+        options:
+          - cold
+          - hot
 
 permissions:
   contents: read
+
+concurrency:
+  group: fedora-build-${{ inputs.cache_key }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 240
     env:
-      CARGO_INCREMENTAL: "0"
-      CARGO_BUILD_JOBS: "16"
+      BENCHMARK_PHASE: ${{ inputs.cache_state }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: useblacksmith/begin-testbox@233448af4bfdc6fca509a7f0974411ac6d8a8043 # v2
-        with:
-          testbox_id: ${{ inputs.testbox_id }}
-      - name: Install Linux build dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          packages=(binutils pkg-config libcap-dev time sccache)
-          pinned=()
-          for package in "${packages[@]}"; do
-            version="$(apt-cache policy "$package" | awk '/Candidate:/ { print $2 }')"
-            test -n "$version" && test "$version" != '(none)'
-            pinned+=("$package=$version")
-          done
-          sudo apt-get install -y --no-install-recommends "${pinned[@]}"
-          dpkg-query -W "${packages[@]}"
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          components: clippy, rustfmt, rust-src
-      - name: Mount persistent sccache disk
+      - name: Mount persistent build inputs
         uses: useblacksmith/stickydisk@2b6822bdbe9c20b2541e9003aefa49e819b3467b # v1
         with:
-          key: codex-build-sccache-v1
-          path: /mnt/codex-sccache
-      - name: Prepare build benchmark environment
-        shell: bash
-        run: |
-          set -euo pipefail
-          target_dir="$HOME/.cache/codex-testbox/target"
-          cache_dir="/mnt/codex-sccache"
-          mountpoint -q "$cache_dir"
-          mkdir -p "$target_dir" "$cache_dir" "$HOME/.cargo"
-          test ! -e "$HOME/.cargo/config.toml"
-          cat > "$HOME/.cargo/config.toml" <<EOF
-          [build]
-          jobs = 16
-          target-dir = "$target_dir"
-          rustc-wrapper = "/usr/bin/sccache"
-
-          [env]
-          CARGO_INCREMENTAL = "0"
-          SCCACHE_DIR = "$cache_dir"
-          SCCACHE_CACHE_SIZE = "20G"
-          EOF
-          echo "CARGO_TARGET_DIR=$target_dir" >> "$GITHUB_ENV"
-          sccache --version
-          cd codex-rs
-          cargo fetch --locked
-          rustc -Vv
-          cargo -V
-          lscpu
-          free -h
-          df -h . "$target_dir" "$cache_dir"
-      - uses: useblacksmith/run-testbox@5ca05834db1d3813554d1dd109e5f2087a8d7cbc # v2
+          key: ${{ inputs.cache_key }}
+          path: /mnt/codex-build-cache
+          commit: "true"
+      # Post actions run in reverse registration order: clean target, then snapshot.
+      - name: Register post-job target cleanup
+        uses: ./.github/actions/fedora-benchmark-cleanup
+      - name: Build and measure Fedora binaries
+        run: bash .github/scripts/fedora-build-benchmark.sh
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: fedora44-${{ inputs.cache_state }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/fedora-benchmark/*.json
+            ${{ runner.temp }}/fedora-benchmark/*.txt
+            ${{ runner.temp }}/fedora-benchmark/*.log
+            ${{ runner.temp }}/fedora-benchmark/cargo-timings/
+          if-no-files-found: error
