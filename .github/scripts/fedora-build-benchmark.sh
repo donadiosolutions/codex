@@ -37,9 +37,9 @@ time-1.9-28.fc44.x86_64
 which-2.25-1.fc44.x86_64
 PACKAGES
   mapfile -t packages < /opt/fedora-benchmark/packages.requested.txt
-  # Resolve and retain the exact transitive RPMs, then install only these files.
+  # Retain missing dependencies; installed base-image providers stay in the image.
   dnf --setopt=cachedir=/cache/dnf --setopt=keepcache=1 download \
-    --resolve --alldeps --destdir=/cache/rpms "${packages[@]}"
+    --resolve --destdir=/cache/rpms "${packages[@]}"
   rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-44-primary
   rpm -K /cache/rpms/*.rpm > /opt/fedora-benchmark/packages.signatures.txt
   rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' /cache/rpms/*.rpm \
