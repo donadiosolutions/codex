@@ -1,0 +1,59 @@
+name: Codex build Testbox
+
+on:
+  workflow_dispatch:
+    inputs:
+      testbox_id:
+        description: Blacksmith Testbox session ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 240
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "16"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: useblacksmith/begin-testbox@233448af4bfdc6fca509a7f0974411ac6d8a8043 # v2
+        with:
+          testbox_id: ${{ inputs.testbox_id }}
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          packages=(binutils pkg-config libcap-dev time)
+          pinned=()
+          for package in "${packages[@]}"; do
+            version="$(apt-cache policy "$package" | awk '/Candidate:/ { print $2 }')"
+            test -n "$version" && test "$version" != '(none)'
+            pinned+=("$package=$version")
+          done
+          sudo apt-get install -y --no-install-recommends "${pinned[@]}"
+          dpkg-query -W "${packages[@]}"
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: clippy, rustfmt, rust-src
+      - name: Prepare build benchmark environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_dir="$HOME/.cache/codex-testbox/target"
+          mkdir -p "$target_dir"
+          echo "CARGO_TARGET_DIR=$target_dir" >> "$GITHUB_ENV"
+          cd codex-rs
+          cargo fetch --locked
+          rustc -Vv
+          cargo -V
+          lscpu
+          free -h
+          df -h . "$target_dir"
+      - uses: useblacksmith/run-testbox@5ca05834db1d3813554d1dd109e5f2087a8d7cbc # v2
