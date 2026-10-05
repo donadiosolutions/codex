@@ -42,12 +42,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           components: clippy, rustfmt, rust-src
+      - name: Mount persistent sccache disk
+        uses: useblacksmith/stickydisk@2b6822bdbe9c20b2541e9003aefa49e819b3467b # v1
+        with:
+          key: codex-build-sccache-v1
+          path: /mnt/codex-sccache
       - name: Prepare build benchmark environment
         shell: bash
         run: |
           set -euo pipefail
           target_dir="$HOME/.cache/codex-testbox/target"
-          cache_dir="$HOME/.cache/codex-testbox/sccache"
+          cache_dir="/mnt/codex-sccache"
+          mountpoint -q "$cache_dir"
           mkdir -p "$target_dir" "$cache_dir" "$HOME/.cargo"
           test ! -e "$HOME/.cargo/config.toml"
           cat > "$HOME/.cargo/config.toml" <<EOF
@@ -69,5 +75,5 @@ jobs:
           cargo -V
           lscpu
           free -h
-          df -h . "$target_dir"
+          df -h . "$target_dir" "$cache_dir"
       - uses: useblacksmith/run-testbox@5ca05834db1d3813554d1dd109e5f2087a8d7cbc # v2
