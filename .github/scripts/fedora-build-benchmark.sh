@@ -65,6 +65,8 @@ if [[ "${1:-}" == --build ]]; then
   export SCCACHE_DIR=/cache/sccache
   export SCCACHE_CACHE_SIZE=20G
   export SCCACHE_SERVER_PORT=4227
+  # Final ThinLTO can outlast the default daemon idle timeout and erase stats.
+  export SCCACHE_IDLE_TIMEOUT=14400
   export RUSTFLAGS='-Z min-recursion-limit=256 -C target-cpu=skylake-avx512 -C debuginfo=full -C strip=none -C split-debuginfo=off -C dwarf-version=5 -C force-frame-pointers=yes'
   STABLE_GIT_COMMIT="$(git -c safe.directory=/src -C /src rev-parse HEAD)"
   export STABLE_GIT_COMMIT
