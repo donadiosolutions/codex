@@ -5,12 +5,13 @@ base_image='registry.fedoraproject.org/fedora@sha256:7011f51bd8089d345be42d41f0a
 base_tag=codex-fedora44-base:7011f51bd8089d345be42d41f0aa3190d258823528852a5e7ec976fe2fd20f53
 
 if [[ "${1:-}" == --prepare-image ]]; then
-  # Fedora retired curl's benchmark pin; keep this release pin explicit.
+  # Reuse signed RPM provisioning, letting DNF resolve Fedora package versions.
   provisioner=/workflow/.github/scripts/fedora-build-benchmark.sh
-  grep -Fxq 'curl-8.18.0-10.fc44.x86_64' "$provisioner"
+  grep -Eq '^alsa-lib-devel-[0-9]' "$provisioner"
+  grep -Eq '^which-[0-9]' "$provisioner"
   prepared_script="$(mktemp)"
   trap 'unlink "$prepared_script"' EXIT
-  sed 's/^curl-8.18.0-10.fc44.x86_64$/curl-8.18.0-12.fc44.x86_64/' \
+  sed -E '/^alsa-lib-devel-[0-9]/,/^which-[0-9]/s/-[0-9].*$//; s/= 1[.]98[.]1$/= "$(rpm -q --qf "%{VERSION}" rust)"/' \
     "$provisioner" > "$prepared_script"
   bash "$prepared_script" --prepare-image
   exit 0
@@ -46,8 +47,9 @@ if [[ "${1:-}" == --build ]]; then
   export LC_ALL=C
   trap 'status=$?; trap - EXIT; sccache --show-stats --stats-format json > /bench/sccache-stats.json 2>/bench/sccache-stats-error.txt || true; sccache --stop-server > /bench/sccache-shutdown.txt 2>&1 || true; exit "$status"' EXIT
 
-  for package in rust cargo rust-src; do
-    test "$(rpm -q --qf '%{VERSION}' "$package")" = 1.98.1
+  rust_version="$(rpm -q --qf '%{VERSION}' rust)"
+  for package in cargo rust-src rust-std-static; do
+    test "$(rpm -q --qf '%{VERSION}' "$package")" = "$rust_version"
   done
   cp /opt/fedora-benchmark/*.txt /bench/
   mkdir -p /bench/raw "$CARGO_HOME" "$SCCACHE_DIR"
@@ -141,7 +143,7 @@ Source commit: $actual_commit
 Target: x86_64-unknown-linux-gnu
 Rust: $(/usr/bin/rustc --version)
 Cargo: $(/usr/bin/cargo --version)
-Fedora packages: rust, cargo, rust-src 1.98.1 from signed Fedora 44 RPMs
+Fedora packages: matching Rust, Cargo and standard library $rust_version from signed Fedora 44 RPMs; DNF-resolved package versions
 Build: cargo build -Zbuild-std=std,panic_abort --locked --release --target x86_64-unknown-linux-gnu --jobs 16 -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host
 RUSTFLAGS: $RUSTFLAGS
 Release profile: optimized release; DEBUG=full, STRIP=none, SPLIT_DEBUGINFO=off
