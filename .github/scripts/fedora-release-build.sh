@@ -13,7 +13,7 @@ if [[ "${1:-}" == --prepare-image ]]; then
   trap 'unlink "$prepared_script"' EXIT
   # Expand the Rust version lookup in the provisioner after DNF installs Rust.
   # shellcheck disable=SC2016
-  sed -E '/^alsa-lib-devel-[0-9]/,/^which-[0-9]/s/-[0-9].*$//; s/--resolve --destdir=/--resolve --arch=x86_64,noarch --destdir=/; s/= 1[.]98[.]1$/= "$(rpm -q --qf "%{VERSION}" rust)"/' \
+  sed -E '/^alsa-lib-devel-[0-9]/,/^which-[0-9]/s/-[0-9].*[.](x86_64|noarch)$/\.\1/; s/= 1[.]98[.]1$/= "$(rpm -q --qf "%{VERSION}" rust)"/' \
     "$provisioner" > "$prepared_script"
   bash "$prepared_script" --prepare-image
   exit 0
