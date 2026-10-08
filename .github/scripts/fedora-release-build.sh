@@ -45,6 +45,8 @@ if [[ "${1:-}" == --build ]]; then
   export CARGO_PROFILE_RELEASE_DEBUG=full
   export CARGO_PROFILE_RELEASE_STRIP=none
   export CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off
+  build_dir=/src
+  source_code_sha="$actual_commit"
   export RUSTFLAGS='-Z min-recursion-limit=256 -C target-cpu=skylake-avx512 -C debuginfo=full -C strip=none -C split-debuginfo=off -C dwarf-version=5 -C force-frame-pointers=yes'
   export LC_ALL=C
   trap 'status=$?; trap - EXIT; sccache --show-stats --stats-format json > /bench/sccache-stats.json 2>/bench/sccache-stats-error.txt || true; sccache --stop-server > /bench/sccache-shutdown.txt 2>&1 || true; exit "$status"' EXIT
@@ -94,7 +96,91 @@ PY
   [[ "$expected_archive" =~ ^[0-9a-f]{64}$ && "$expected_binding" =~ ^[0-9a-f]{64}$ ]] || { echo 'Rusty V8 manifest does not contain both expected artifacts' >&2; exit 1; }
   printf '%s  %s\n' "$expected_archive" "$RUSTY_V8_ARCHIVE" "$expected_binding" "$RUSTY_V8_SRC_BINDING_PATH" | sha256sum --check -
 
-  cd /src/codex-rs
+  original_lock=/src/codex-rs/Cargo.lock
+  metadata=/bench/workspace-metadata.json
+  /usr/bin/cargo metadata --manifest-path /src/codex-rs/Cargo.toml \
+    --locked --no-deps --format-version 1 > "$metadata"
+  original_lock_sha="$(sha256sum "$original_lock" | cut -d' ' -f1)"
+  cp "$original_lock" /bench/Cargo.lock.original
+  lock_repair=$(python3 - "$metadata" "$original_lock" <<'PY'
+import json
+import sys
+import tomllib
+from pathlib import Path
+
+metadata = json.loads(Path(sys.argv[1]).read_text())
+lock = tomllib.loads(Path(sys.argv[2]).read_text())
+members = set(metadata["workspace_members"])
+versions = {p["name"]: p["version"] for p in metadata["packages"] if p["id"] in members}
+local = [p for p in lock["package"] if "source" not in p]
+old = {p["name"]: p["version"] for p in local}
+if len(versions) != len(members) or len(old) != len(local) or set(versions) != set(old):
+    raise SystemExit("ambiguous or incomplete workspace/local lock package set")
+print(sum(old[name] != version for name, version in versions.items()))
+PY
+)
+  if [[ "$lock_repair" -gt 0 ]]; then
+    build_dir=/bench/source
+    [[ ! -e "$build_dir" ]] || { echo "Repair source destination already exists: $build_dir" >&2; exit 1; }
+    mkdir -p "$build_dir"
+    cp -a /src/. "$build_dir/"
+    cmp -s "$original_lock" "$build_dir/codex-rs/Cargo.lock" || {
+      echo 'Source-copy lockfile differs from the selected source lockfile' >&2
+      exit 1
+    }
+    timeout --kill-after=30s 10m /usr/bin/cargo update --workspace \
+      --manifest-path "$build_dir/codex-rs/Cargo.toml"
+    python3 - "$metadata" /bench/Cargo.lock.original "$build_dir/codex-rs/Cargo.lock" <<'PY'
+import copy
+import json
+import sys
+import tomllib
+from collections import Counter
+from pathlib import Path
+
+metadata = json.loads(Path(sys.argv[1]).read_text())
+before = tomllib.loads(Path(sys.argv[2]).read_text())
+after = tomllib.loads(Path(sys.argv[3]).read_text())
+members = set(metadata["workspace_members"])
+versions = {p["name"]: p["version"] for p in metadata["packages"] if p["id"] in members}
+expected = copy.deepcopy(before)
+local = [p for p in before["package"] if "source" not in p]
+old = {p["name"]: p["version"] for p in local}
+if len(versions) != len(members) or len(old) != len(local) or set(versions) != set(old):
+    raise SystemExit("ambiguous or incomplete workspace/local lock package set")
+changed = 0
+for package in expected["package"]:
+    if "source" in package:
+        continue
+    changed += package["version"] != versions[package["name"]]
+    package["version"] = versions[package["name"]]
+    for index, dependency in enumerate(package.get("dependencies", [])):
+        parts = dependency.split(" ", 2)
+        if len(parts) == 2 and parts[0] in old and parts[1] == old[parts[0]]:
+            parts[1] = versions[parts[0]]
+            package["dependencies"][index] = " ".join(parts)
+key = lambda package: json.dumps(package, sort_keys=True)
+other_before = {k: v for k, v in before.items() if k != "package"}
+other_after = {k: v for k, v in after.items() if k != "package"}
+if not changed or other_before != other_after or Counter(map(key, expected["package"])) != Counter(map(key, after["package"])):
+    raise SystemExit("Cargo changed lock data beyond workspace package versions/references")
+print(f"External records unchanged; normalized {changed} local workspace package versions")
+PY
+    repaired_lock_sha="$(sha256sum "$build_dir/codex-rs/Cargo.lock" | cut -d' ' -f1)"
+    source_code_sha="$(git -c safe.directory="$build_dir" -C "$build_dir" rev-parse HEAD)"
+    [[ "$source_code_sha" == "$actual_commit" ]] || { echo 'Repair copy source commit changed' >&2; exit 1; }
+    git -c safe.directory="$build_dir" -C "$build_dir" diff --quiet "$actual_commit" -- . ':(exclude)codex-rs/Cargo.lock' || {
+      echo 'Workspace lock repair changed source files outside Cargo.lock' >&2
+      exit 1
+    }
+    cd "$build_dir/codex-rs"
+  else
+    repaired_lock_sha="$original_lock_sha"
+    cd /src/codex-rs
+  fi
+  printf 'Source code unchanged SHA: %s\nOriginal workspace lock SHA-256: %s\nNormalized workspace lock SHA-256: %s\nWorkspace package versions repaired: %s\nBuild source directory: %s\n' \
+    "$source_code_sha" "$original_lock_sha" "$repaired_lock_sha" "$lock_repair" "$build_dir" \
+    > /bench/workspace-lock-repair.txt
   /usr/bin/cargo fetch --locked --target "$target"
   /usr/bin/cargo fetch --locked --manifest-path /usr/lib/rustlib/src/rust/library/Cargo.toml
   export CARGO_NET_OFFLINE=true
@@ -142,6 +228,10 @@ PY
   cat > /bench/build-details.txt <<EOF
 Source repository: $source_repository
 Source commit: $actual_commit
+Source code unchanged SHA: $source_code_sha
+Original workspace lock SHA-256: $original_lock_sha
+Normalized workspace lock SHA-256: $repaired_lock_sha
+Workspace package versions repaired: $lock_repair
 Target: x86_64-unknown-linux-gnu
 Rust: $(/usr/bin/rustc --version)
 Cargo: $(/usr/bin/cargo --version)
