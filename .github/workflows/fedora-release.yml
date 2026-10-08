@@ -1,10 +1,7 @@
 name: Fedora GNU release
-run-name: Fedora GNU release ${{ inputs.release_tag || 'fedora44-gnu-trial-20261008' }} from ${{ inputs.gitref || 'rust-v0.160.0' }}
+run-name: Fedora GNU release ${{ inputs.release_tag }} from ${{ inputs.gitref }}
 
 on:
-  # Temporary branch-only trigger for GitHub trial execution.
-  push:
-    branches: [feat/fedora-gnu-release]
   workflow_dispatch:
     inputs:
       gitref:
@@ -33,8 +30,8 @@ jobs:
     steps:
       - name: Check release inputs and credential configuration
         env:
-          GITREF: ${{ inputs.gitref || 'rust-v0.160.0' }}
-          RELEASE_TAG: ${{ inputs.release_tag || 'fedora44-gnu-trial-20261008' }}
+          GITREF: ${{ inputs.gitref }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
           TOKEN_CONFIGURED: ${{ secrets.CODEX_RELEASE_TOKEN != '' }}
         run: |
           set -euo pipefail
@@ -49,7 +46,7 @@ jobs:
       - name: Resolve the source to an immutable commit
         id: source
         env:
-          GITREF: ${{ inputs.gitref || 'rust-v0.160.0' }}
+          GITREF: ${{ inputs.gitref }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -83,7 +80,7 @@ jobs:
 
       - name: Reject an output tag at a different commit
         env:
-          RELEASE_TAG: ${{ inputs.release_tag || 'fedora44-gnu-trial-20261008' }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
           SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
         run: |
           set -euo pipefail
@@ -152,7 +149,7 @@ jobs:
     permissions:
       contents: write
     env:
-      RELEASE_TAG: ${{ inputs.release_tag || 'fedora44-gnu-trial-20261008' }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
       SOURCE_COMMIT: ${{ needs.build.outputs.source_commit }}
     steps:
       - name: Download release assets
@@ -209,8 +206,8 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           token: ${{ secrets.CODEX_RELEASE_TOKEN }}
-          tag_name: ${{ inputs.release_tag || 'fedora44-gnu-trial-20261008' }}
-          name: ${{ inputs.release_tag || 'fedora44-gnu-trial-20261008' }}
+          tag_name: ${{ inputs.release_tag }}
+          name: ${{ inputs.release_tag }}
           body_path: release-artifacts/release-notes.md
           files: |
             release-artifacts/dist/codex-x86_64-unknown-linux-gnu.zst
