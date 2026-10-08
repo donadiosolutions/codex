@@ -20,6 +20,7 @@ if [[ "${1:-}" == --prepare-image ]]; then
 fi
 
 if [[ "${1:-}" == --build ]]; then
+  [[ ! -e /cache/images ]] || { echo 'Host image cache must not be visible in the build container' >&2; exit 1; }
   workspace="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
   source_dir="$workspace/source"
   results="${RUNNER_TEMP:?RUNNER_TEMP is required}"
@@ -258,6 +259,19 @@ results="${RUNNER_TEMP:?RUNNER_TEMP is required}/fedora-benchmark"
 container=codex-fedora44-benchmark
 mkdir -p "$cache/images" "$cache/dnf" "$cache/rpms" "$cache/cargo" \
   "$cache/sccache" "$cache/rusty_v8" "$results"
+for cache_dir in images dnf rpms cargo sccache rusty_v8; do
+  [[ -d "$cache/$cache_dir" && ! -L "$cache/$cache_dir" ]] || {
+    echo "Cache directory must not be a symlink: $cache/$cache_dir" >&2
+    exit 1
+  }
+done
+# Mutable compiler/source caches cannot cross the selected source boundary.
+cargo_cache="$cache/cargo/$source_commit"
+sccache_cache="$cache/sccache/$source_commit"
+mkdir -p "$cargo_cache" "$sccache_cache"
+for cache_dir in "$cargo_cache" "$sccache_cache"; do
+  [[ -d "$cache_dir" && ! -L "$cache_dir" ]] || { echo "Unsafe source cache: $cache_dir" >&2; exit 1; }
+done
 [[ ! -e "$results/target" && ! -e "$results/raw" && ! -e "$results/dist" ]] || {
   echo "Results directory already contains build output: $results" >&2
   exit 1
@@ -302,14 +316,33 @@ save_image() {
   (cd "$(dirname "$2")" && sha256sum "$(basename "$2")" > "$(basename "$2").sha256")
 }
 start_container() {
+  local image="$1" phase="$2"
+  local -a mounts=(
+    --mount "type=bind,src=$workspace/source,dst=/src,readonly"
+    --mount "type=bind,src=$workspace,dst=/workflow,readonly"
+    --mount "type=bind,src=$results,dst=/bench"
+  )
+  case "$phase" in
+    prepare)
+      mounts+=(
+        --mount "type=bind,src=$cache/dnf,dst=/cache/dnf"
+        --mount "type=bind,src=$cache/rpms,dst=/cache/rpms"
+      )
+      ;;
+    build)
+      mounts+=(
+        --mount "type=bind,src=$cargo_cache,dst=/cache/cargo"
+        --mount "type=bind,src=$sccache_cache,dst=/cache/sccache"
+        --mount "type=bind,src=$cache/rusty_v8,dst=/cache/rusty_v8"
+      )
+      ;;
+    *) echo "Unknown container phase: $phase" >&2; return 2 ;;
+  esac
   docker run --detach --name "$container" --cpus=16 --pids-limit=2048 \
-    --mount "type=bind,src=$workspace/source,dst=/src,readonly" \
-    --mount "type=bind,src=$workspace,dst=/workflow,readonly" \
-    --mount "type=bind,src=$cache,dst=/cache" \
-    --mount "type=bind,src=$results,dst=/bench" \
+    "${mounts[@]}" \
     --env "SOURCE_COMMIT=$source_commit" --env "SOURCE_REPOSITORY=$source_repository" \
     --env GITHUB_WORKSPACE=/workflow --env RUNNER_TEMP=/bench \
-    --workdir /src/codex-rs "$1" sleep 12600
+    --workdir /src/codex-rs "$image" sleep 12600
   created=true
 }
 
@@ -324,7 +357,7 @@ else
     save_image "$base_tag" "$base_tar"
     base_sum="$base_tar.sha256"
   fi
-  start_container "$base_tag"
+  start_container "$base_tag" prepare
   timeout --kill-after=30s 30m docker exec "$container" \
     bash /workflow/.github/scripts/fedora-release-build.sh --prepare-image
   docker commit "$container" "$prepared_image" > "$results/prepared-image-id.txt"
@@ -334,7 +367,7 @@ else
   created=false
 fi
 
-start_container "$prepared_image"
+start_container "$prepared_image" build
 docker inspect "$container" --format '{{json .HostConfig}}' > "$results/container-host-config.json"
 docker image inspect "$prepared_image" > "$results/prepared-image.json"
 printf '%s\n' "$base_image" > "$results/base-image.txt"

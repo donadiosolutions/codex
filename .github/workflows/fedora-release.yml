@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: fedora-build-codex-fedora44-release-v1
+  group: fedora-build-codex-fedora44-release-v2
   cancel-in-progress: false
 
 jobs:
@@ -111,7 +111,7 @@ jobs:
       - name: Mount persistent build inputs
         uses: useblacksmith/stickydisk@2b6822bdbe9c20b2541e9003aefa49e819b3467b # v1
         with:
-          key: codex-fedora44-release-v1
+          key: codex-fedora44-release-v2
           path: /mnt/codex-build-cache
           commit: "true"
       # Post actions run in reverse order: remove target, then snapshot the disk.
@@ -201,7 +201,33 @@ jobs:
               git -C source push "https://github.com/$GITHUB_REPOSITORY.git" \
               "$SOURCE_COMMIT:refs/tags/$RELEASE_TAG"
           fi
+      - name: Preserve existing release metadata
+        id: metadata
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Listing also includes drafts that the by-tag endpoint can omit.
+          timeout --kill-after=5s 60s gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/existing-releases.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          pages = json.loads((temp / "existing-releases.json").read_text())
+          matches = [r for page in pages for r in page if r["tag_name"] == os.environ["RELEASE_TAG"]]
+          release = min(matches, key=lambda r: (r["draft"], r["id"])) if matches else {}
+          (temp / "existing-release.json").write_text(json.dumps(release))
+          values = {"exists": str(bool(release)).lower(), "id": str(release.get("id", "")),
+                    "url": release.get("html_url", "")}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              for key, value in values.items():
+                  output.write(f"{key}={value}\n")
+          PY
       - name: Publish the release
+        if: steps.metadata.outputs.exists == 'false'
         id: release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
@@ -219,11 +245,20 @@ jobs:
           draft: false
           prerelease: false
           make_latest: "false"
+      - name: Attach assets to the existing release
+        if: steps.metadata.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_RELEASE_TOKEN }}
+        run: |
+          gh release upload --repo "$GITHUB_REPOSITORY" --clobber -- "$RELEASE_TAG" \
+            release-artifacts/dist/codex-x86_64-unknown-linux-gnu.zst \
+            release-artifacts/dist/codex-code-mode-host-x86_64-unknown-linux-gnu.zst \
+            release-artifacts/dist/SHA256SUMS
       - name: Verify published source and asset digests
         env:
           GH_TOKEN: ${{ secrets.CODEX_RELEASE_TOKEN }}
-          RELEASE_ID: ${{ steps.release.outputs.id }}
-          RELEASE_URL: ${{ steps.release.outputs.url }}
+          RELEASE_ID: ${{ steps.release.outputs.id || steps.metadata.outputs.id }}
+          RELEASE_URL: ${{ steps.release.outputs.url || steps.metadata.outputs.url }}
         run: |
           set -euo pipefail
           refs="$(git ls-remote --exit-code --tags "https://github.com/$GITHUB_REPOSITORY.git" \
@@ -242,7 +277,12 @@ jobs:
           temp = Path(os.environ["RUNNER_TEMP"])
           release = json.loads((temp / "published-release.json").read_text())
           assert release["tag_name"] == os.environ["RELEASE_TAG"]
-          assert not release["draft"]
+          existing = json.loads((temp / "existing-release.json").read_text())
+          if "id" in existing:
+              for field in ("name", "body", "draft", "prerelease"):
+                  assert release[field] == existing[field], f"Existing release {field} changed"
+          else:
+              assert not release["draft"]
           assets = [asset for page in json.loads((temp / "published-assets.json").read_text()) for asset in page]
           for name in ("codex-x86_64-unknown-linux-gnu.zst", "codex-code-mode-host-x86_64-unknown-linux-gnu.zst", "SHA256SUMS"):
               path = Path("release-artifacts/dist") / name
