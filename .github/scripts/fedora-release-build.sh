@@ -11,6 +11,8 @@ if [[ "${1:-}" == --prepare-image ]]; then
   grep -Eq '^which-[0-9]' "$provisioner"
   prepared_script="$(mktemp)"
   trap 'unlink "$prepared_script"' EXIT
+  # Expand the Rust version lookup in the provisioner after DNF installs Rust.
+  # shellcheck disable=SC2016
   sed -E '/^alsa-lib-devel-[0-9]/,/^which-[0-9]/s/-[0-9].*$//; s/= 1[.]98[.]1$/= "$(rpm -q --qf "%{VERSION}" rust)"/' \
     "$provisioner" > "$prepared_script"
   bash "$prepared_script" --prepare-image
