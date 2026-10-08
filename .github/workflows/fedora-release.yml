@@ -68,6 +68,11 @@ jobs:
               printf 'Source: %s at %s\n' "$repository" "$commit"
               exit 0
             fi
+            # GitHub uses 422 for a missing commit/tag, as well as other errors.
+            if [[ "$status" == 422 ]] && python3 -c \
+              'import json, os, sys; sys.exit(json.load(open(sys.argv[1])).get("message") != "No commit found for SHA: " + os.environ["GITREF"])' "$response"; then
+              continue
+            fi
             if [[ "$status" != 404 ]]; then
               echo "::error::Source lookup in $repository failed with HTTP $status; refusing upstream fallback."
               exit 1
