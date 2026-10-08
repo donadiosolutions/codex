@@ -11,6 +11,7 @@ from .layout import build_package_dir
 from .layout import prepare_package_dir
 from .layout import validate_package_dir
 from .ripgrep import resolve_rg_bin
+from .symbols import strip_binary
 from .targets import PACKAGE_VARIANTS
 from .targets import TARGET_SPECS
 from .targets import PackageInputs
@@ -45,6 +46,10 @@ def parse_package_version(value: str) -> str:
 
 
 def parse_args() -> argparse.Namespace:
+    return create_parser().parse_args()
+
+
+def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build a canonical Codex package directory and optional archive.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -104,6 +109,21 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Cargo profile for source-built package artifacts. Use release for release packages."
         ),
+    )
+    parser.add_argument(
+        "--strip",
+        choices=("auto", "all", "none"),
+        default="auto",
+        help=(
+            "Strip Unix first-party package binaries: auto strips source-built "
+            "release-profile inputs, all also strips other profiles and prebuilt "
+            "inputs, none preserves symbols. "
+            "Original inputs and third-party resources are never modified."
+        ),
+    )
+    parser.add_argument(
+        "--strip-tool",
+        help="Target-compatible strip executable override, for example llvm-strip.",
     )
     parser.add_argument(
         "--entrypoint-bin",
@@ -169,11 +189,18 @@ def parse_args() -> argparse.Namespace:
             "scripts/codex_package/rg."
         ),
     )
-    return parser.parse_args()
+    return parser
 
 
 def main() -> int:
     args = parse_args()
+    package_dir = assemble_package(args)
+    archive_package(package_dir, args)
+    return 0
+
+
+def assemble_package(args: argparse.Namespace) -> Path:
+    """Build the directory before optional downstream additions and archiving."""
     spec = TARGET_SPECS[getattr(args, "target", None) or default_target()]
     variant = PACKAGE_VARIANTS[args.variant]
     package_dir_arg = getattr(args, "package_dir", None)
@@ -225,17 +252,29 @@ def main() -> int:
     )
     prepare_package_dir(package_dir, force=args.force)
     build_package_dir(package_dir, args.package_version, variant, spec, inputs)
+    for filename, prebuilt in (
+        (variant.entrypoint_name(spec), args.entrypoint_bin),
+        (f"codex-code-mode-host{spec.exe_suffix}", args.code_mode_host_bin),
+    ):
+        if args.strip == "all" or (
+            args.strip == "auto"
+            and args.cargo_profile == "release"
+            and prebuilt is None
+        ):
+            strip_binary(package_dir / "bin" / filename, spec, tool=args.strip_tool)
     validate_package_dir(
         package_dir, variant, spec, include_zsh=inputs.zsh_bin is not None
     )
+    return package_dir
 
+
+def archive_package(package_dir: Path, args: argparse.Namespace) -> None:
     for archive_output in args.archive_output:
         archive_path = archive_output.resolve()
         write_archive(package_dir, archive_path, force=args.force)
         print(f"Built Codex package archive at {archive_path}")
 
     print(f"Built Codex package directory at {package_dir}")
-    return 0
 
 
 def resolve_optional_input_path(

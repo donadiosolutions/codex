@@ -80,7 +80,6 @@ use codex_features::TokenBudgetConfigToml;
 use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
-use codex_install_context::InstallContext;
 use codex_login::AuthManagerConfig;
 use codex_login::AuthRouteConfig;
 use codex_mcp::DEFAULT_OPTIONAL_MCP_STARTUP_GRACE;
@@ -155,7 +154,6 @@ use crate::config::permissions::BUILT_IN_READ_ONLY_PROFILE;
 use crate::config::permissions::BUILT_IN_WORKSPACE_PROFILE;
 use crate::config::permissions::apply_network_proxy_feature_config;
 use crate::config::permissions::default_builtin_permission_profile_name;
-use crate::config::permissions::get_readable_roots_required_for_codex_runtime;
 use crate::config::permissions::network_proxy_config_for_profile_selection;
 use crate::config::permissions::validate_user_permission_profile_names;
 use crate::responses_metadata::validate_extra_metadata;
@@ -221,6 +219,7 @@ pub use windows_sandbox_config::PreparedWindowsSandboxConfig;
 use windows_sandbox_config::config_allows_mxc;
 pub use windows_sandbox_config::prepare_windows_sandbox_config;
 use windows_sandbox_config::resolve_windows_sandbox_type;
+pub use windows_sandbox_config::windows_mxc_allowed_by_config;
 
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_FILES: i64 = 10 * 1024 * 1024;
@@ -708,6 +707,8 @@ pub struct Config {
     /// The resolved policy config replaces its `{{ tenant_policy_config }}`
     /// placeholder when a review session is built.
     pub guardian_policy_template: Option<String>,
+    /// Transcript encoding shared by Guardian review and scoring.
+    pub guardian_transcript_mode: codex_protocol::TranscriptFormat,
 
     /// Optional replacement for the gated history-retrieval instructions.
     /// Blank config values are treated as unset, like other Guardian policy overrides.
@@ -743,6 +744,9 @@ pub struct Config {
 
     /// Whether to inject the `<environment_context>` user block.
     pub include_environment_context: bool,
+
+    /// Whether environment context includes the current date and timezone.
+    pub include_environment_context_time: bool,
 
     /// Compact prompt override.
     pub compact_prompt: Option<String>,
@@ -999,12 +1003,10 @@ pub struct Config {
     /// When this program is invoked, arg0 will be set to `codex-linux-sandbox`.
     pub codex_linux_sandbox_exe: Option<PathBuf>,
 
-    /// Path to the `codex-execve-wrapper` executable used for shell
-    /// escalation. This cannot be set in the config file: it must be set in
-    /// code via [`ConfigOverrides`].
+    /// Ignored compatibility field for clients that still pass the retired wrapper path.
     pub main_execve_wrapper_exe: Option<PathBuf>,
 
-    /// Optional absolute path to patched zsh used by zsh-exec-bridge-backed shell execution.
+    /// Ignored compatibility field for clients that still pass a patched zsh path.
     pub zsh_path: Option<PathBuf>,
 
     /// Value to use for `reasoning.effort` when making a request using the
@@ -1454,6 +1456,7 @@ pub struct ConfigBuilder {
     cloud_config_bundle: CloudConfigBundleLoader,
     thread_config_loader: Option<Arc<dyn ThreadConfigLoader>>,
     fallback_cwd: Option<PathBuf>,
+    without_project_context: bool,
 }
 
 impl ConfigBuilder {
@@ -1500,6 +1503,12 @@ impl ConfigBuilder {
         self
     }
 
+    /// Materializes `Config.cwd` without using it as config-layer context.
+    pub fn without_project_context(mut self) -> Self {
+        self.without_project_context = true;
+        self
+    }
+
     pub async fn build(self) -> std::io::Result<Config> {
         // Keep the large config-loading future off small runtime thread stacks.
         Box::pin(self.build_inner()).await
@@ -1515,6 +1524,7 @@ impl ConfigBuilder {
             cloud_config_bundle,
             thread_config_loader,
             fallback_cwd,
+            without_project_context,
         } = self;
         let codex_home = match codex_home {
             Some(codex_home) => AbsolutePathBuf::from_absolute_path(codex_home)?,
@@ -1532,7 +1542,7 @@ impl ConfigBuilder {
         let config_layer_stack = load_config_layers_state(
             LOCAL_FS.as_ref(),
             &codex_home,
-            Some(cwd),
+            (!without_project_context).then_some(cwd),
             &cli_overrides,
             ConfigLoadOptions {
                 loader_overrides,
@@ -1859,6 +1869,7 @@ impl Config {
             environment_cwds: HashMap::new(),
             environment_use_mxc: HashMap::new(),
             server_permission_profiles: HashMap::new(),
+            codex_self_exe: self.codex_self_exe.clone(),
             codex_linux_sandbox_exe: self.codex_linux_sandbox_exe.clone(),
             use_legacy_landlock: self.features.use_legacy_landlock(),
             apps_enabled: self.features.enabled(Feature::Apps),
@@ -1922,7 +1933,6 @@ impl Config {
         cwd: PathBuf,
         refreshed_layers: &ConfigLayerStack,
         codex_home: AbsolutePathBuf,
-        default_zsh_path: Option<AbsolutePathBuf>,
     ) -> std::io::Result<Self> {
         let config_layer_stack =
             Self::layer_stack_preserving_session(session_layers, refreshed_layers)?;
@@ -1932,7 +1942,6 @@ impl Config {
             cfg,
             ConfigOverrides {
                 cwd: Some(cwd),
-                default_zsh_path,
                 ..Default::default()
             },
             codex_home,
@@ -2022,8 +2031,7 @@ impl Config {
     /// designed to use [AskForApproval::Never] exclusively.
     ///
     /// Further, [ConfigOverrides] contains some options that are not supported
-    /// in [ConfigToml], such as `cwd`, `codex_self_exe`, `codex_linux_sandbox_exe`, and
-    /// `main_execve_wrapper_exe`.
+    /// in [ConfigToml], such as `cwd`, `codex_self_exe`, and `codex_linux_sandbox_exe`.
     pub async fn load_with_cli_overrides_and_harness_overrides(
         cli_overrides: Vec<(String, TomlValue)>,
         harness_overrides: ConfigOverrides,
@@ -2656,8 +2664,8 @@ pub struct ConfigOverrides {
     pub service_tier: Option<Option<String>>,
     pub codex_self_exe: Option<PathBuf>,
     pub codex_linux_sandbox_exe: Option<PathBuf>,
+    /// Ignored compatibility field for clients that still pass the retired wrapper path.
     pub main_execve_wrapper_exe: Option<PathBuf>,
-    pub default_zsh_path: Option<AbsolutePathBuf>,
     pub base_instructions: Option<String>,
     pub developer_instructions: Option<String>,
     /// Deprecated: `friendly` and `pragmatic` no longer select a style.
@@ -3351,8 +3359,7 @@ impl Config {
             service_tier: service_tier_override,
             codex_self_exe,
             codex_linux_sandbox_exe,
-            main_execve_wrapper_exe,
-            default_zsh_path,
+            main_execve_wrapper_exe: _,
             base_instructions,
             developer_instructions,
             personality,
@@ -3439,6 +3446,14 @@ impl Config {
         };
         let respect_system_proxy = features.enabled(Feature::RespectSystemProxy);
         let enable_network_proxy = features.enabled(Feature::NetworkProxy);
+        let allow_mxc =
+            cfg.windows.as_ref().and_then(|windows| windows.allow_mxc) != Some(false);
+        if !allow_mxc && resolve_windows_sandbox_mode(&cfg) == Some(WindowsSandboxModeToml::Mxc) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "windows.sandbox = \"mxc\" is not allowed when windows.allow_mxc = false",
+            ));
+        }
         let PreparedWindowsSandboxConfig {
             mode: windows_sandbox_mode,
             sandbox_type: windows_sandbox_type,
@@ -3534,7 +3549,7 @@ impl Config {
                 profiles_are_active,
                 permission_profile.as_ref(),
                 network_requirements.as_ref(),
-                cfg.features.as_ref(),
+                &cfg,
                 enable_network_proxy,
             )?
             && codex_sandboxing::windows_mxc_available();
@@ -3925,7 +3940,7 @@ impl Config {
             .unwrap_or(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS)
             .max(MIN_EMPTY_YIELD_TIME_MS);
         let thread_unload_delay =
-            Duration::from_secs(cfg.thread_unload_delay_secs.unwrap_or(/*default*/ 60));
+            Duration::from_secs(cfg.thread_unload_delay_secs.unwrap_or(/*default*/ 1800));
         if std::time::Instant::now()
             .checked_add(thread_unload_delay)
             .is_none()
@@ -3989,6 +4004,9 @@ impl Config {
                     .enabled(Feature::FastMode)
                     .then(|| ServiceTier::Fast.request_value().to_string()),
                 Some(ServiceTier::Flex) => Some(ServiceTier::Flex.request_value().to_string()),
+                None if service_tier == "ultrafast" => features
+                    .enabled(Feature::UltrafastMode)
+                    .then_some(service_tier),
                 None => Some(service_tier),
             }
         });
@@ -4033,6 +4051,7 @@ impl Config {
             .as_ref()
             .and_then(|skills| skills.max_context_tokens);
         let include_environment_context = cfg.include_environment_context.unwrap_or(true);
+        let include_environment_context_time = cfg.include_environment_context_time.unwrap_or(true);
         let guardian_policy_config =
             guardian_policy_config_from_requirements(config_layer_stack.requirements_toml())
                 .or_else(|| {
@@ -4053,6 +4072,15 @@ impl Config {
                 normalize_guardian_policy_config(auto_review.extra_policy.as_deref())
             })
         });
+        let guardian_transcript_mode = cfg
+            .features
+            .as_ref()
+            .and_then(|features| features.guardianv2.as_ref())
+            .and_then(|feature| match feature {
+                FeatureToml::Config(config) => config.transcript_mode,
+                FeatureToml::Enabled(_) => None,
+            })
+            .unwrap_or_default();
         let guardian_policy_template = cfg
             .auto_review
             .as_ref()
@@ -4080,10 +4108,6 @@ impl Config {
         )
         .await?;
         let compact_prompt = compact_prompt.or(file_compact_prompt);
-        let zsh_path = default_zsh_path
-            .or_else(|| InstallContext::current().bundled_zsh_path())
-            .map(AbsolutePathBuf::into_path_buf);
-
         let review_model = override_review_model.or(cfg.review_model);
 
         let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(true);
@@ -4177,11 +4201,11 @@ impl Config {
             &network_permission_profile,
             &shell_environment_policy.r#set,
         )?;
-        let mut helper_readable_roots = get_readable_roots_required_for_codex_runtime(
-            &codex_home,
-            zsh_path.as_ref(),
-            main_execve_wrapper_exe.as_ref(),
-        );
+        let mut helper_readable_roots: Vec<_> = std::env::var_os("PATH")
+            .as_deref()
+            .and_then(|path| permissions::active_arg0_helper_dir(&codex_home, path))
+            .into_iter()
+            .collect();
         if features.enabled(Feature::MemoryTool) && memories_config.use_memories {
             helper_readable_roots.push(memories_root);
         }
@@ -4337,6 +4361,7 @@ impl Config {
             cloud_skill_enabled,
             orchestrator_mcp_enabled,
             include_environment_context,
+            include_environment_context_time,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
             // is important in code to differentiate the mode from the store implementation.
             cli_auth_credentials_store_mode: match cli_auth_credentials_store {
@@ -4411,8 +4436,8 @@ impl Config {
             file_opener: cfg.file_opener.unwrap_or(UriBasedFileOpener::VsCode),
             codex_self_exe,
             codex_linux_sandbox_exe,
-            main_execve_wrapper_exe,
-            zsh_path,
+            main_execve_wrapper_exe: None,
+            zsh_path: None,
 
             hide_agent_reasoning: cfg.hide_agent_reasoning.unwrap_or(false),
             show_raw_agent_reasoning: cfg
@@ -4422,6 +4447,7 @@ impl Config {
             guardian_policy_config,
             guardian_extra_policy,
             guardian_policy_template,
+            guardian_transcript_mode,
             guardian_conversation_history_prompt,
             guardian_conversation_history_max_output_tokens,
             guardian_circuit_break_action: cfg

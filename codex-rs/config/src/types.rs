@@ -194,6 +194,8 @@ pub enum WindowsSandboxModeToml {
 #[schemars(deny_unknown_fields)]
 pub struct WindowsToml {
     pub sandbox: Option<WindowsSandboxModeToml>,
+    /// False blocks both explicit MXC configuration and automatic selection.
+    pub allow_mxc: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, JsonSchema)]
@@ -1005,6 +1007,8 @@ pub struct ExternalConfigMigrationPrompts {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct Notice {
+    /// Tracks whether the user has acknowledged the AWS GovCloud guidance.
+    pub hide_gov_cloud_guidance: Option<bool>,
     /// Tracks whether the user has acknowledged the full access warning prompt.
     pub hide_full_access_warning: Option<bool>,
     /// Tracks whether the user has acknowledged the Windows world-writable directories warning.

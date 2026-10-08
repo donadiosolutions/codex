@@ -523,6 +523,7 @@ async fn handle_approved_mcp_tool_call(
                         &server,
                         call_id,
                         Some(&metadata),
+                        prepared_call.is_host_owned_apps(),
                     );
                     let request_meta = with_mcp_tool_call_ids_meta(
                         request_meta,
@@ -875,6 +876,10 @@ async fn augment_mcp_tool_request_meta_with_sandbox_state(
     // TODO(anp): Build this metadata from the server's captured
     // TurnEnvironment::sandbox_context instead of the runtime-wide Landlock value.
     let sandbox_state = serde_json::to_value(SandboxState {
+        codex_executable: prepared_call
+            .sandbox_codex_executable()
+            .await
+            .map(AbsolutePathBuf::into_path_buf),
         permission_profile: prepared_call.permission_profile().clone(),
         codex_linux_sandbox_exe: prepared_call.config().codex_linux_sandbox_exe.clone(),
         sandbox_cwd,
@@ -1308,6 +1313,7 @@ fn build_mcp_tool_call_request_meta(
     server: &str,
     call_id: &str,
     metadata: Option<&McpToolApprovalMetadata>,
+    is_host_owned_apps: bool,
 ) -> Option<serde_json::Value> {
     let mut request_meta = serde_json::Map::new();
     request_meta.insert(
@@ -1336,6 +1342,16 @@ fn build_mcp_tool_call_request_meta(
             "call_id".to_string(),
             serde_json::Value::String(call_id.to_string()),
         );
+        // Only the captured host-owned Apps registration receives Core lineage.
+        codex_apps_meta.remove("root_turn_id");
+        if is_host_owned_apps
+            && let Some(root_turn_id) = step_context.turn.turn_metadata_state.root_turn_id()
+        {
+            codex_apps_meta.insert(
+                "root_turn_id".to_string(),
+                serde_json::Value::String(root_turn_id),
+            );
+        }
         request_meta.insert(
             MCP_TOOL_CODEX_APPS_META_KEY.to_string(),
             serde_json::Value::Object(codex_apps_meta),

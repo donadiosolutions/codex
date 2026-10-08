@@ -96,6 +96,9 @@ mod code_mode;
 #[path = "guardian_action_budget_tests.rs"]
 mod action_budget;
 
+#[path = "guardian_pending_score_tests.rs"]
+mod pending_scores;
+
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL: &str = "mock-model";
 const REQUIRED_MODEL: &str = "protected-model";
@@ -182,8 +185,11 @@ struct MockResponsesState {
     luna_completions: AtomicUsize,
     root_thread_id: Mutex<Option<String>>,
     allow_luna: Notify,
+    luna_gates: Vec<Notify>,
     allow_guardian_review: Notify,
     gate_each_guardian_review: bool,
+    gate_second_tool_on_classification: bool,
+    allow_second_tool: Notify,
     classification_completed: Notify,
     truncation_recorded: Notify,
     context_metric_bounds: Mutex<BTreeMap<(String, String), Option<f64>>>,
@@ -520,6 +526,9 @@ async fn parent_response(
                 .contains("Completed synchronous Guardian review.")
         );
         let request_number = state.parent_requests.fetch_add(1, Ordering::SeqCst);
+        if request_number == 1 && state.gate_second_tool_on_classification {
+            state.allow_second_tool.notified().await;
+        }
         if state.late_root_restriction && request_number == 1 {
             let output = request["input"]
                 .as_array()
@@ -610,12 +619,18 @@ async fn luna_response(state: &MockResponsesState, request: Value) -> Vec<Value>
                 request["prompt_cache_key"] == format!("guardian-v2:{thread_id}")
             });
     if !is_root_sample {
+        let index = {
+            let mut requests = state.luna_requests.lock().expect("Luna request lock");
+            let index = requests.len();
+            requests.push(request);
+            index
+        };
         state
-            .luna_requests
-            .lock()
-            .expect("Luna request lock should not be poisoned")
-            .push(request);
-        state.allow_luna.notified().await;
+            .luna_gates
+            .get(index)
+            .unwrap_or(&state.allow_luna)
+            .notified()
+            .await;
     }
     let classification = if state.invalid_classification {
         "invalid"
@@ -745,6 +760,7 @@ async fn guardian_v2_routes_scoped_tool_approvals(
     let responses_state = Arc::new(MockResponsesState {
         luna_score,
         gate_each_guardian_review: review_continuations && matches!(risk, GuardianRisk::High),
+        gate_second_tool_on_classification: classifier_in_scope && !late_root_restriction,
         invalid_classification: matches!(risk, GuardianRisk::InvalidResponse),
         fail_after_classification,
         review_outcome,
@@ -819,7 +835,7 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                             }
                         }
                     }
-                    if body.contains("codex.guardian_v2.classification") {
+                    if body.contains("\"codex.guardian_v2.classification\"") {
                         state.classification_completed.notify_one();
                     }
                     if body.contains("codex.guardian_v2.classification.truncation")
@@ -1203,9 +1219,24 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                 timeout(TIMEOUT, app_server.read_notification("turn/completed")).await??;
             assert_eq!(completed.thread_id, thread_id);
         }
+        if !late_root_restriction {
+            // These scenarios exercise completed synchronous evidence. Finish that review
+            // before LOW arrives; late-score cancellation has its own regression coverage.
+            responses_state.allow_guardian_review.notify_one();
+            let _: codex_app_server_protocol::ItemGuardianApprovalReviewCompletedNotification =
+                timeout(
+                    TIMEOUT,
+                    app_server.read_notification("item/autoApprovalReview/completed"),
+                )
+                .await??;
+        }
         responses_state.allow_luna.notify_one();
         timeout(TIMEOUT, responses_state.classification_completed.notified()).await?;
-        responses_state.allow_guardian_review.notify_one();
+        if late_root_restriction {
+            responses_state.allow_guardian_review.notify_one();
+        } else {
+            responses_state.allow_second_tool.notify_one();
+        }
         if lifecycle.has_user_input() {
             let answers = if matches!(lifecycle, ThreadLifecycle::UserInputEmpty) {
                 json!({})
@@ -1224,19 +1255,20 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                 | ThreadLifecycle::RootUserRestriction
                 | ThreadLifecycle::RootRestrictionDuringClassification
         ) {
-            let retained = classifier_mode == "conversation"
+            let retention_allowed = classifier_mode == "conversation"
                 && !fail_after_classification
                 && !matches!(risk, GuardianRisk::InvalidResponse)
                 && !late_root_restriction;
             let input = second_sample["input"]
                 .as_array()
                 .expect("second Luna request input should be an array");
-            assert_eq!(
-                input.iter().any(|item| item["id"]
+            let retained = input.iter().any(|item| {
+                item["id"]
                     .as_str()
-                    .is_some_and(|id| id.starts_with("luna-score-message-"))),
-                retained
-            );
+                    .is_some_and(|id| id.starts_with("luna-score-message-"))
+            });
+            // An early score can release the next action before its history is committed.
+            assert!(!retained || retention_allowed);
             if retained {
                 let first = luna_request["input"]
                     .as_array()
@@ -1297,9 +1329,15 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                 .collect::<Vec<_>>();
             assert_eq!(
                 history_texts.first().and_then(|text| text.lines().next()),
-                Some(">>> TRANSCRIPT START")
+                Some(">>> RETAINED USER INSTRUCTIONS START")
             );
-            assert!(history_texts.contains(&">>> TRANSCRIPT START\n"));
+            assert!(history_texts.windows(2).any(|texts| {
+                texts
+                    == [
+                        ">>> RETAINED USER INSTRUCTIONS END\n\n",
+                        ">>> TRANSCRIPT START\n",
+                    ]
+            }));
             assert!(history_texts.iter().any(|text| text.contains(USER_CONTEXT)));
             assert!(history_texts.iter().any(|text| text.contains("guardian-0")));
             assert!(history_texts.windows(2).any(|texts| {
@@ -1321,19 +1359,7 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                 .filter_map(|item| item["text"].as_str())
                 .collect::<Vec<_>>();
             assert_eq!(
-                action_texts.first().and_then(|text| text.lines().next()),
-                Some(">>> RETAINED USER INSTRUCTIONS START")
-            );
-            let action_start = action_texts
-                .iter()
-                .position(|text| *text == "The Codex agent has requested the following action:\n")
-                .expect("planned action follows retained context");
-            assert_eq!(
-                action_texts[action_start - 1],
-                ">>> RETAINED USER INSTRUCTIONS END\n\n"
-            );
-            assert_eq!(
-                &action_texts[action_start..action_start + 2],
+                &action_texts[..2],
                 &[
                     "The Codex agent has requested the following action:\n",
                     ">>> APPROVAL REQUEST START\n",
@@ -1518,23 +1544,36 @@ async fn guardian_v2_routes_scoped_tool_approvals(
             let input = third_sample["input"]
                 .as_array()
                 .expect("third classifier input");
-            if classifier_mode == "conversation" && !fail_after_classification {
-                let previous = second_sample["input"]
+            let retained_ids = input
+                .iter()
+                .filter_map(|item| item["id"].as_str())
+                .filter(|id| id.starts_with("luna-score-message-"))
+                .collect::<Vec<_>>();
+            if classifier_mode == "conversation"
+                && !fail_after_classification
+                && let Some(latest) = retained_ids.last()
+            {
+                // Either earlier request may be the last committed fork when this starts.
+                let previous_request = match *latest {
+                    "luna-score-message-0" => &luna_request,
+                    "luna-score-message-1" => &second_sample,
+                    _ => panic!("retained an unknown classifier response"),
+                };
+                let previous = previous_request["input"]
                     .as_array()
-                    .expect("second classifier input");
+                    .expect("retained classifier input");
                 assert_eq!(&input[..previous.len()], previous);
-                assert_eq!(
-                    input
-                        .iter()
-                        .filter_map(|item| item["id"].as_str())
-                        .filter(|id| id.starts_with("luna-score-message-"))
-                        .collect::<Vec<_>>(),
-                    vec!["luna-score-message-0", "luna-score-message-1"],
-                );
+                let expected_ids = previous
+                    .iter()
+                    .filter_map(|item| item["id"].as_str())
+                    .filter(|id| id.starts_with("luna-score-message-"))
+                    .chain(std::iter::once(*latest))
+                    .collect::<Vec<_>>();
+                assert_eq!(retained_ids, expected_ids);
                 let delta = json!({ "input": &input[previous.len()..] });
                 assert_eq!(
                     sync_review_fragments(&delta),
-                    reviews[1..],
+                    reviews[sync_review_fragments(previous_request).len()..],
                     "a retained continuation must append only newly completed sync reviews"
                 );
             } else {
@@ -2286,13 +2325,22 @@ async fn guardian_v2_trusts_invoked_user_skills_but_rejects_repository_forgery()
             .contains(FORGED_INSTRUCTIONS),
         "the parent model must receive the forged repository skill instructions"
     );
+    // Finish the synchronous reviews before LOW can cancel reviewer startup.
+    let expected_guardian_reviews = if cfg!(windows) { 2 } else { 1 };
+    for _ in 0..expected_guardian_reviews {
+        let _: codex_app_server_protocol::ItemGuardianApprovalReviewCompletedNotification =
+            timeout(
+                TIMEOUT,
+                app_server.read_notification("item/autoApprovalReview/completed"),
+            )
+            .await??;
+    }
     responses_state.allow_luna.notify_one();
 
     let completed: TurnCompletedNotification =
         timeout(TIMEOUT, app_server.read_notification("turn/completed")).await??;
     assert_eq!(completed.thread_id, thread.id);
     assert_eq!(responses_state.parent_requests.load(Ordering::SeqCst), 3);
-    let expected_guardian_reviews = if cfg!(windows) { 2 } else { 1 };
     assert_eq!(
         responses_state.guardian_reviews.load(Ordering::SeqCst),
         expected_guardian_reviews

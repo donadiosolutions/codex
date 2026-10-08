@@ -791,6 +791,9 @@
             "chronicle": {
               "type": "boolean"
             },
+            "cli_daybreak": {
+              "type": "boolean"
+            },
             "code_mode": {
               "$ref": "#/definitions/FeatureToml_for_CodeModeConfigToml"
             },
@@ -810,6 +813,12 @@
               "type": "boolean"
             },
             "code_mode_prewarm": {
+              "type": "boolean"
+            },
+            "code_mode_tool_description_first": {
+              "type": "boolean"
+            },
+            "code_mode_tool_search": {
               "type": "boolean"
             },
             "codex_apps_mcp_2026_07_28": {
@@ -1199,6 +1208,9 @@
             "tui_app_server": {
               "type": "boolean"
             },
+            "ultrafast_mode": {
+              "type": "boolean"
+            },
             "unavailable_dummy_tools": {
               "type": "boolean"
             },
@@ -1269,6 +1281,9 @@
           "type": "boolean"
         },
         "include_environment_context": {
+          "type": "boolean"
+        },
+        "include_environment_context_time": {
           "type": "boolean"
         },
         "include_permissions_instructions": {
@@ -1957,6 +1972,14 @@
         },
         "transcript": {
           "$ref": "#/definitions/GuardianV2TranscriptConfigToml"
+        },
+        "transcript_mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TranscriptFormat"
+            }
+          ],
+          "description": "Transcript encoding for synchronous Guardian review and asynchronous scoring. Defaults to line."
         }
       },
       "type": "object"
@@ -3256,6 +3279,10 @@
           "description": "Tracks whether the user has acknowledged the full access warning prompt.",
           "type": "boolean"
         },
+        "hide_gov_cloud_guidance": {
+          "description": "Tracks whether the user has acknowledged the AWS GovCloud guidance.",
+          "type": "boolean"
+        },
         "hide_gpt-5.1-codex-max_migration_prompt": {
           "description": "Tracks whether the user has seen the gpt-5.1-codex-max migration prompt",
           "type": "boolean"
@@ -4487,6 +4514,25 @@
       },
       "type": "object"
     },
+    "TranscriptFormat": {
+      "description": "Transcript encoding shared by rendering, provenance instructions and budget recovery.",
+      "oneOf": [
+        {
+          "description": "Numbered entries with a role prefix and unescaped text.",
+          "enum": [
+            "line"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Host-owned metadata with message text escaped as a JSON string.",
+          "enum": [
+            "json"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "TrustLevel": {
       "description": "Represents the trust level for a project directory. This determines the approval policy and sandbox mode applied.",
       "enum": [
@@ -4579,7 +4625,8 @@
               "resume": null,
               "search": null,
               "stop": null,
-              "toggle_grouping": null
+              "toggle_grouping": null,
+              "toggle_pin": null
             },
             "approval": {
               "approve": null,
@@ -5004,6 +5051,14 @@
             }
           ],
           "description": "Toggle grouping tasks by status or project."
+        },
+        "toggle_pin": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Pin or unpin the selected task in the shared sidebar section."
         }
       },
       "type": "object"
@@ -5533,7 +5588,8 @@
             "resume": null,
             "search": null,
             "stop": null,
-            "toggle_grouping": null
+            "toggle_grouping": null,
+            "toggle_pin": null
           }
         },
         "approval": {
@@ -6692,6 +6748,10 @@
     "WindowsToml": {
       "additionalProperties": false,
       "properties": {
+        "allow_mxc": {
+          "description": "False blocks both explicit MXC configuration and automatic selection.",
+          "type": "boolean"
+        },
         "sandbox": {
           "$ref": "#/definitions/WindowsSandboxModeToml"
         }
@@ -6961,6 +7021,9 @@
         "chronicle": {
           "type": "boolean"
         },
+        "cli_daybreak": {
+          "type": "boolean"
+        },
         "code_mode": {
           "$ref": "#/definitions/FeatureToml_for_CodeModeConfigToml"
         },
@@ -6980,6 +7043,12 @@
           "type": "boolean"
         },
         "code_mode_prewarm": {
+          "type": "boolean"
+        },
+        "code_mode_tool_description_first": {
+          "type": "boolean"
+        },
+        "code_mode_tool_search": {
           "type": "boolean"
         },
         "codex_apps_mcp_2026_07_28": {
@@ -7369,6 +7438,9 @@
         "tui_app_server": {
           "type": "boolean"
         },
+        "ultrafast_mode": {
+          "type": "boolean"
+        },
         "unavailable_dummy_tools": {
           "type": "boolean"
         },
@@ -7518,6 +7590,10 @@
     },
     "include_environment_context": {
       "description": "Whether to inject the `<environment_context>` user block.",
+      "type": "boolean"
+    },
+    "include_environment_context_time": {
+      "description": "Whether environment context includes the current date and timezone.",
       "type": "boolean"
     },
     "include_permissions_instructions": {
@@ -7855,7 +7931,7 @@
       "type": "boolean"
     },
     "thread_unload_delay_secs": {
-      "description": "Seconds a thread must have no subscribers and no activity before app-server unloads it. Defaults to 60; zero unloads immediately. Changes require a server restart.",
+      "description": "Seconds a thread must have no subscribers and no activity before app-server unloads it. Defaults to 1800 (30 minutes); zero unloads immediately. Changes require a server restart.",
       "format": "uint64",
       "minimum": 0.0,
       "type": "integer"

@@ -62,7 +62,7 @@ use crate::server::EffectiveMcpServer;
 use crate::tools::ToolInfo;
 
 pub const CODEX_APPS_MCP_SERVER_NAME: &str = "codex_apps";
-const DEFAULT_CODEX_APPS_MCP_PRODUCT_SKU: &str = "codex";
+pub(crate) const DEFAULT_CODEX_APPS_MCP_PRODUCT_SKU: &str = "codex";
 const MCP_TOOL_NAME_PREFIX: &str = "mcp";
 const MCP_TOOL_NAME_DELIMITER: &str = "__";
 const CODEX_CONNECTORS_TOKEN_ENV_VAR: &str = "CODEX_CONNECTORS_TOKEN";
@@ -164,6 +164,9 @@ pub struct McpConfig {
     pub environment_use_mxc: HashMap<String, bool>,
     /// Explicit server permissions; unresolved or unavailable servers have no entry.
     pub server_permission_profiles: HashMap<String, PermissionProfile>,
+    /// Host-supplied re-exec binary. Probe its sandbox capability before advertising it.
+    /// Never infer this from PATH or an MCP server's configuration.
+    pub codex_self_exe: Option<PathBuf>,
     /// Optional path to `codex-linux-sandbox` for sandboxed MCP tool execution.
     pub codex_linux_sandbox_exe: Option<PathBuf>,
     /// Whether to use legacy Landlock behavior in the MCP sandbox state.

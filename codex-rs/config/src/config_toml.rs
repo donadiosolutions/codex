@@ -265,6 +265,9 @@ pub struct ConfigToml {
     /// Whether to inject the `<environment_context>` user block.
     pub include_environment_context: Option<bool>,
 
+    /// Whether environment context includes the current date and timezone.
+    pub include_environment_context_time: Option<bool>,
+
     /// Optional path to a file containing model instructions that will override
     /// the built-in instructions for the selected model. Users are STRONGLY
     /// DISCOURAGED from using this field, as deviating from the instructions
@@ -344,7 +347,8 @@ pub struct ConfigToml {
     pub background_terminal_max_timeout: Option<u64>,
 
     /// Seconds a thread must have no subscribers and no activity before app-server
-    /// unloads it. Defaults to 60; zero unloads immediately. Changes require a server restart.
+    /// unloads it. Defaults to 1800 (30 minutes); zero unloads immediately.
+    /// Changes require a server restart.
     pub thread_unload_delay_secs: Option<u64>,
 
     /// Deprecated: ignored.
