@@ -4,6 +4,18 @@ set -euo pipefail
 base_image='registry.fedoraproject.org/fedora@sha256:7011f51bd8089d345be42d41f0aa3190d258823528852a5e7ec976fe2fd20f53'
 base_tag=codex-fedora44-base:7011f51bd8089d345be42d41f0aa3190d258823528852a5e7ec976fe2fd20f53
 
+if [[ "${1:-}" == --prepare-image ]]; then
+  # Fedora retired curl's benchmark pin; keep this release pin explicit.
+  provisioner=/workflow/.github/scripts/fedora-build-benchmark.sh
+  grep -Fxq 'curl-8.18.0-10.fc44.x86_64' "$provisioner"
+  prepared_script="$(mktemp)"
+  trap 'unlink "$prepared_script"' EXIT
+  sed 's/^curl-8.18.0-10.fc44.x86_64$/curl-8.18.0-12.fc44.x86_64/' \
+    "$provisioner" > "$prepared_script"
+  bash "$prepared_script" --prepare-image
+  exit 0
+fi
+
 if [[ "${1:-}" == --build ]]; then
   workspace="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
   source_dir="$workspace/source"
@@ -220,7 +232,7 @@ else
   fi
   start_container "$base_tag"
   timeout --kill-after=30s 30m docker exec "$container" \
-    bash /workflow/.github/scripts/fedora-build-benchmark.sh --prepare-image
+    bash /workflow/.github/scripts/fedora-release-build.sh --prepare-image
   docker commit "$container" "$prepared_image" > "$results/prepared-image-id.txt"
   save_image "$prepared_image" "$prepared_tar"
   docker stop --time 30 "$container" > "$results/provision-container-stop.txt"
