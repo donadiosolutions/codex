@@ -15,6 +15,8 @@ if [[ "${1:-}" == --prepare-image ]]; then
   # shellcheck disable=SC2016
   sed -E '/^alsa-lib-devel-[0-9]/,/^which-[0-9]/s/-[0-9].*[.](x86_64|noarch)$/\.\1/; s/= 1[.]98[.]1$/= "$(rpm -q --qf "%{VERSION}" rust)"/' \
     "$provisioner" > "$prepared_script"
+  # Extend only this release image; retain signed RPM provisioning.
+  sed -i '/^which[.]x86_64$/i autoconf-2.72-10.fc44.noarch\nbison-3.8.2-15.fc44.x86_64\ngettext-0.26-5.fc44.x86_64\nncurses-devel-6.6-1.fc44.x86_64\nnodejs24-24.18.0-1.fc44.x86_64\nnodejs24-npm-11.16.0-1.24.18.0.1.fc44.noarch' "$prepared_script"
   bash "$prepared_script" --prepare-image
   exit 0
 fi
@@ -49,6 +51,8 @@ if [[ "${1:-}" == --build ]]; then
   build_dir=/src
   source_code_sha="$actual_commit"
   export RUSTFLAGS='-Z min-recursion-limit=256 -C target-cpu=skylake-avx512 -C debuginfo=full -C strip=none -C split-debuginfo=off -C dwarf-version=5 -C force-frame-pointers=yes'
+  export CFLAGS='-O3 -march=skylake-avx512 -g -gdwarf-5 -fno-omit-frame-pointer'
+  export CXXFLAGS="$CFLAGS"
   export LC_ALL=C
   trap 'status=$?; trap - EXIT; sccache --show-stats --stats-format json > /bench/sccache-stats.json 2>/bench/sccache-stats-error.txt || true; sccache --stop-server > /bench/sccache-shutdown.txt 2>&1 || true; exit "$status"' EXIT
 
@@ -188,11 +192,18 @@ PY
   /usr/bin/sccache --zero-stats
   /usr/bin/sccache --show-stats --stats-format json > /bench/sccache-before-build.json
   /usr/bin/cargo build -Zbuild-std=std,panic_abort --locked --release \
+    --target "$target" --jobs 16 -p codex-bwrap --bin bwrap
+  export CODEX_BWRAP_SHA256
+  CODEX_BWRAP_SHA256="$(sha256sum "$CARGO_TARGET_DIR/$target/release/bwrap" | cut -d' ' -f1)"
+  /usr/bin/cargo build -Zbuild-std=std,panic_abort --locked --release \
     --target "$target" --jobs 16 -p codex-cli --bin codex \
     -p codex-code-mode-host --bin codex-code-mode-host
 
-  for binary in codex codex-code-mode-host; do
+  bash /workflow/.github/scripts/fedora-release-package.sh --build "$build_dir"
+
+  for binary in codex codex-code-mode-host bwrap codex-voice-host zsh; do
     path="$CARGO_TARGET_DIR/$target/release/$binary"
+    if [[ "$binary" == zsh ]]; then path=/bench/zsh/codex-zsh/bin/zsh; fi
     [[ -x "$path" ]] || { echo "Missing built executable: $path" >&2; exit 1; }
     headers="$(readelf -hW "$path")"
     grep -Fq 'Class:                             ELF64' <<< "$headers"
@@ -226,6 +237,8 @@ PY
     } > "/bench/$binary.build-details.txt"
   done
 
+  bash /workflow/.github/scripts/fedora-release-package.sh --package "$build_dir"
+
   cat > /bench/build-details.txt <<EOF
 Source repository: $source_repository
 Source commit: $actual_commit
@@ -239,6 +252,12 @@ Cargo: $(/usr/bin/cargo --version)
 Fedora packages: matching Rust, Cargo and standard library $rust_version from signed Fedora 44 RPMs; DNF-resolved package versions
 Build: cargo build -Zbuild-std=std,panic_abort --locked --release --target x86_64-unknown-linux-gnu --jobs 16 -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host
 RUSTFLAGS: $RUSTFLAGS
+C/C++ flags: $CFLAGS
+Bundled bwrap SHA-256: $CODEX_BWRAP_SHA256
+Additional builds: codex-bwrap, codex-voice-host, pinned native voice libraries/plugins, patched zsh
+npm version: $RELEASE_VERSION
+npm vendor selector: x86_64-unknown-linux-musl (launcher compatibility only; compiled payload targets Fedora GNU)
+Reused upstream prebuilts: manifest-verified ripgrep and Rusty V8
 Release profile: optimized release; DEBUG=full, STRIP=none, SPLIT_DEBUGINFO=off
 CPU requirement: x86-64 Skylake AVX-512 or newer with compatible AVX-512 support
 Rusty V8: prebuilt ptrcomp_sandbox_release archive and binding, verified against selected-source release manifest
@@ -281,7 +300,7 @@ mkdir "$results/raw" "$results/dist"
 helper="$workspace/.github/scripts/fedora-release-build.sh"
 provisioner="$workspace/.github/scripts/fedora-build-benchmark.sh"
 [[ -x "$helper" && -f "$provisioner" ]] || { echo 'Missing trusted build helper or image provisioner' >&2; exit 1; }
-prepared_key="$(cat "$provisioner" "$helper" | sha256sum | cut -c1-24)"
+prepared_key="$(cat "$provisioner" "$helper" "$workspace/.github/scripts/fedora-release-package.sh" | sha256sum | cut -c1-24)"
 prepared_image="codex-fedora44-benchmark:$prepared_key"
 prepared_tar="$cache/images/prepared-$prepared_key.tar"
 prepared_sum="$prepared_tar.sha256"
@@ -341,6 +360,7 @@ start_container() {
   docker run --detach --name "$container" --cpus=16 --pids-limit=2048 \
     "${mounts[@]}" \
     --env "SOURCE_COMMIT=$source_commit" --env "SOURCE_REPOSITORY=$source_repository" \
+    --env "RELEASE_VERSION=${RELEASE_VERSION:?RELEASE_VERSION is required}" \
     --env GITHUB_WORKSPACE=/workflow --env RUNNER_TEMP=/bench \
     --workdir /src/codex-rs "$image" sleep 12600
   created=true
@@ -392,9 +412,10 @@ for binary in codex codex-code-mode-host; do
   [[ "$raw_sha" == "$compressed_sha" ]] || { echo "Decompressed checksum mismatch for $binary" >&2; exit 1; }
 done
 (cd "$results/dist" && sha256sum codex-x86_64-unknown-linux-gnu.zst \
-  codex-code-mode-host-x86_64-unknown-linux-gnu.zst > SHA256SUMS)
-[[ "$(find "$results/dist" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 3 ]] || {
-  echo 'dist/ must contain exactly the two compressed binaries and SHA256SUMS' >&2
+  codex-code-mode-host-x86_64-unknown-linux-gnu.zst \
+  "codex-npm-linux-x64-${RELEASE_VERSION}.tgz" > SHA256SUMS)
+[[ "$(find "$results/dist" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 4 ]] || {
+  echo 'dist/ must contain exactly the two compressed binaries, npm tarball and SHA256SUMS' >&2
   exit 1
 }
 (cd "$results/dist" && sha256sum --check SHA256SUMS)
@@ -410,8 +431,8 @@ Debug information: full Rust DWARF5, unstripped symbols, split debuginfo disable
 Native V8: verified prebuilt ptrcomp_sandbox_release archive and binding
 Compressor: $(cat "$results/zstd-version.txt")
 Compression flags: ${zstd_flags[*]}
-Artifacts: codex-x86_64-unknown-linux-gnu.zst and codex-code-mode-host-x86_64-unknown-linux-gnu.zst
-Checksums: SHA256SUMS contains the SHA-256 digests of both compressed artifacts
+Artifacts: codex-x86_64-unknown-linux-gnu.zst, codex-code-mode-host-x86_64-unknown-linux-gnu.zst, codex-npm-linux-x64-${RELEASE_VERSION}.tgz
+Checksums: SHA256SUMS contains the SHA-256 digests of all three release artifacts
 EOF
 {
   printf '\nBuild environment:\n\n~~~text\n'

@@ -27,6 +27,8 @@ jobs:
     outputs:
       source_repository: ${{ steps.source.outputs.repository }}
       source_commit: ${{ steps.source.outputs.commit }}
+      release_version: ${{ steps.version.outputs.release_version }}
+      npm_version: ${{ steps.version.outputs.npm_version }}
     steps:
       - name: Check release inputs and credential configuration
         env:
@@ -42,6 +44,52 @@ jobs:
             echo '::error::Configure CODEX_RELEASE_TOKEN with Contents and Workflows write access to this repository.'
             exit 1
           fi
+
+      - name: Normalize and validate release version
+        id: version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+
+          tag = os.environ["RELEASE_TAG"]
+          if tag.startswith("rust-v"):
+              version = tag[len("rust-v"):]
+          elif tag.startswith("v"):
+              version = tag[1:]
+          else:
+              version = tag
+
+          # Match npm's SemVer shape. Build metadata is excluded because the
+          # npm builder appends its platform suffix to this version.
+          pattern = re.compile(
+              r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+              r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+          )
+          match = pattern.fullmatch(version)
+          if not match:
+              raise SystemExit(f"Invalid release tag version: {tag!r}")
+          max_safe_integer = 9_007_199_254_740_991
+          numbers = list(match.group(1, 2, 3))
+          prerelease = match.group(4)
+          if prerelease:
+              for identifier in prerelease.split("."):
+                  if identifier.isdigit():
+                      if (len(identifier) > 1 and identifier.startswith("0")
+                              or int(identifier) > max_safe_integer):
+                          raise SystemExit(f"Invalid numeric prerelease identifier: {identifier!r}")
+          if any(int(number) > max_safe_integer for number in numbers):
+              raise SystemExit("Release version numeric component exceeds npm's safe integer range")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"release_version={version}\n")
+              output.write(f"npm_version={version}-linux-x64\n")
+          print(f"Release version: {version}")
+          print(f"npm version: {version}-linux-x64")
+          PY
 
       - name: Resolve the source to an immutable commit
         id: source
@@ -121,6 +169,8 @@ jobs:
         env:
           SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
           SOURCE_REPOSITORY: ${{ steps.source.outputs.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.release_version }}
         run: bash .github/scripts/fedora-release-build.sh
       - name: Upload compressed release assets and notes
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -140,6 +190,9 @@ jobs:
             ${{ runner.temp }}/fedora-benchmark/*.json
             ${{ runner.temp }}/fedora-benchmark/*.txt
             ${{ runner.temp }}/fedora-benchmark/*.log
+            ${{ runner.temp }}/fedora-benchmark/voice-native/*.log
+            ${{ runner.temp }}/fedora-benchmark/voice-native/*.json
+            ${{ runner.temp }}/fedora-benchmark/voice-sdk/sdk.json
           if-no-files-found: warn
 
   publish:
@@ -150,6 +203,7 @@ jobs:
       contents: write
     env:
       RELEASE_TAG: ${{ inputs.release_tag }}
+      RELEASE_VERSION: ${{ needs.build.outputs.release_version }}
       SOURCE_COMMIT: ${{ needs.build.outputs.source_commit }}
     steps:
       - name: Download release assets
@@ -238,6 +292,7 @@ jobs:
           files: |
             release-artifacts/dist/codex-x86_64-unknown-linux-gnu.zst
             release-artifacts/dist/codex-code-mode-host-x86_64-unknown-linux-gnu.zst
+            release-artifacts/dist/codex-npm-linux-x64-${{ needs.build.outputs.release_version }}.tgz
             release-artifacts/dist/SHA256SUMS
           fail_on_unmatched_files: true
           overwrite_files: true
@@ -253,6 +308,7 @@ jobs:
           gh release upload --repo "$GITHUB_REPOSITORY" --clobber -- "$RELEASE_TAG" \
             release-artifacts/dist/codex-x86_64-unknown-linux-gnu.zst \
             release-artifacts/dist/codex-code-mode-host-x86_64-unknown-linux-gnu.zst \
+            "release-artifacts/dist/codex-npm-linux-x64-${RELEASE_VERSION}.tgz" \
             release-artifacts/dist/SHA256SUMS
       - name: Verify published source and asset digests
         env:
@@ -284,7 +340,7 @@ jobs:
           else:
               assert not release["draft"]
           assets = [asset for page in json.loads((temp / "published-assets.json").read_text()) for asset in page]
-          for name in ("codex-x86_64-unknown-linux-gnu.zst", "codex-code-mode-host-x86_64-unknown-linux-gnu.zst", "SHA256SUMS"):
+          for name in ("codex-x86_64-unknown-linux-gnu.zst", "codex-code-mode-host-x86_64-unknown-linux-gnu.zst", f"codex-npm-linux-x64-{os.environ['RELEASE_VERSION']}.tgz", "SHA256SUMS"):
               path = Path("release-artifacts/dist") / name
               matching = [asset for asset in assets if asset["name"] == name]
               assert len(matching) == 1, f"Expected one published asset: {name}"
