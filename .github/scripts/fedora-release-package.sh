@@ -97,7 +97,7 @@ PKG
   fi
   # zsh defaults to linking with -s unless these variables are explicitly set.
   GITHUB_WORKSPACE="$zsh_workspace" RUNNER_TEMP=/bench ZSH_COMMIT="$zsh_commit" \
-    ZSH_PATCH="$zsh_patch" ZSH_BUILD_JOBS=16 LDFLAGS= EXELDFLAGS= LIBLDFLAGS= \
+    ZSH_PATCH="$zsh_patch" ZSH_BUILD_JOBS=16 LDFLAGS='' EXELDFLAGS='' LIBLDFLAGS='' \
     bash /workflow/.github/scripts/build-zsh-release-artifact.sh /bench/zsh.tar.gz \
     > /bench/zsh-build.log 2>&1
   mkdir /bench/zsh
