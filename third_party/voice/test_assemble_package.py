@@ -224,6 +224,79 @@ class AssembleTests(unittest.TestCase):
                 release_version="0.154.0-alpha.8",
             )
 
+    def test_fedora_release_suffix_preserves_release_version_and_matching_build(self):
+        self.commit = "b" * 40
+        target = "aarch64-apple-darwin"
+        runtime, _ = self.make_runtime(target, "plugins/libgst{}.dylib")
+        staged = self.root / "staged-fedora"
+        stage(runtime, staged, target)
+        seal(staged, target)
+        version = "0.154.0-alpha.8-fedora44"
+        self.metadata["version"] = version
+        self.metadata["target"] = target
+        (self.package / "codex-package.json").write_text(json.dumps(self.metadata))
+
+        assemble(
+            self.package,
+            self.helper,
+            target,
+            self.commit,
+            self.output,
+            runtime=staged,
+            release_version=version,
+        )
+
+        manifest = json.loads(
+            (self.output / "codex-resources/voice/manifest.json").read_text()
+        )
+        self.assertEqual(manifest["appVersion"], version)
+        self.assertEqual(manifest["buildCommit"], self.commit)
+
+    def test_general_semver_prereleases_match_npm_version_rules(self):
+        self.commit = "b" * 40
+        target = "aarch64-apple-darwin"
+        runtime, _ = self.make_runtime(target, "plugins/libgst{}.dylib")
+        staged = self.root / "staged-semver"
+        stage(runtime, staged, target)
+        seal(staged, target)
+
+        accepted = ("0.154.0-rc.1", "0.154.0-alpha.17.2-fedora44")
+        for index, version in enumerate(accepted):
+            with self.subTest(version=version):
+                self.metadata["version"] = version
+                self.metadata["target"] = target
+                (self.package / "codex-package.json").write_text(
+                    json.dumps(self.metadata)
+                )
+                output = self.root / f"valid-prerelease-{index}"
+                assemble(
+                    self.package,
+                    self.helper,
+                    target,
+                    self.commit,
+                    output,
+                    runtime=staged,
+                    release_version=version,
+                )
+
+        rejected = ("0.154.0-rc.01", "0.154.0-rc.1+build")
+        for index, version in enumerate(rejected):
+            with self.subTest(version=version):
+                self.metadata["version"] = version
+                (self.package / "codex-package.json").write_text(
+                    json.dumps(self.metadata)
+                )
+                with self.assertRaisesRegex(ValueError, "package version"):
+                    assemble(
+                        self.package,
+                        self.helper,
+                        target,
+                        self.commit,
+                        self.root / f"invalid-prerelease-{index}",
+                        runtime=staged,
+                        release_version=version,
+                    )
+
     def test_alpha_receipt_requires_matching_signed_hashes(self):
         target = "x86_64-apple-darwin"
         runtime, _ = self.make_runtime(target, "plugins/libgst{}.dylib")
