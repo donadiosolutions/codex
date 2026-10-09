@@ -95,8 +95,9 @@ PKG
     printf '%s  %s\n' 696b7d923b8071554d00e811afb9a08fcad4baada796f7314d12ecd72d06152c \
       "$zsh_workspace/$zsh_patch" | sha256sum --check -
   fi
+  # zsh defaults to linking with -s unless these variables are explicitly set.
   GITHUB_WORKSPACE="$zsh_workspace" RUNNER_TEMP=/bench ZSH_COMMIT="$zsh_commit" \
-    ZSH_PATCH="$zsh_patch" ZSH_BUILD_JOBS=16 \
+    ZSH_PATCH="$zsh_patch" ZSH_BUILD_JOBS=16 LDFLAGS= EXELDFLAGS= LIBLDFLAGS= \
     bash /workflow/.github/scripts/build-zsh-release-artifact.sh /bench/zsh.tar.gz \
     > /bench/zsh-build.log 2>&1
   mkdir /bench/zsh
