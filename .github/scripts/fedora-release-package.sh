@@ -22,11 +22,22 @@ PY
       "$url" -o "/bench/voice-archives/$archive"
     printf '%s  %s\n' "$digest" "/bench/voice-archives/$archive" | sha256sum --check -
   done < /bench/voice-downloads.txt
+  # Fedora GCC reports ../lib64; the private SDK requires the canonical lib/.
+  # Adjust only this configure option in a temporary selected-source recipe.
+  cp -a "$voice" /bench/voice-recipe
+  python3 - <<'PYLIBFFI'
+from pathlib import Path
+path = Path('/bench/voice-recipe/build_native.py')
+text = path.read_text()
+needle = '"--disable-docs",\n                *configure_options,'
+assert text.count(needle) == 1, 'unsupported selected-source libffi configure recipe'
+path.write_text(text.replace(needle, '"--disable-docs",\n                "--disable-multi-os-directory",\n                *configure_options,', 1))
+PYLIBFFI
   native_flags=()
   for flag in -O3 -march=skylake-avx512 -g -gdwarf-5 -fno-omit-frame-pointer; do
     native_flags+=("--c-flag=$flag" "--cxx-flag=$flag")
   done
-  python3 "$voice/build_native.py" --archives /bench/voice-archives \
+  python3 /bench/voice-recipe/build_native.py --archives /bench/voice-archives \
     --output /bench/voice-native --target "$target" --jobs 16 \
     --cc /usr/bin/gcc --cxx /usr/bin/g++ --ar /usr/bin/ar --ranlib /usr/bin/ranlib \
     --cmake /usr/bin/cmake --make /usr/bin/make --pkg-config /usr/bin/pkg-config \
