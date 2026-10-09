@@ -2475,6 +2475,7 @@ impl Session {
                         .initiating_agent_path()
                         .cloned(),
                     status,
+                    message_delivery: turn_context.config.multi_agent_v2.message_delivery,
                     error_info,
                 },
                 &self.services.rollout_thread_trace,

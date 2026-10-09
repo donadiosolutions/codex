@@ -50,11 +50,19 @@ fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
         arguments: json!({"target": "/root/worker", "message": "secret message"}).to_string(),
     };
     assert_eq!(
-        tool_log_payload(&payload, &ToolCallSource::DirectPlaintextMessage),
+        tool_log_payload(
+            &payload,
+            &ToolCallSource::DirectPlaintextMessage,
+            codex_features::MultiAgentMessageDelivery::Encrypted
+        ),
         "[plaintext arguments]"
     );
     assert_eq!(
-        tool_log_payload(&payload, &ToolCallSource::Direct),
+        tool_log_payload(
+            &payload,
+            &ToolCallSource::Direct,
+            codex_features::MultiAgentMessageDelivery::Encrypted
+        ),
         payload.log_payload()
     );
 }
@@ -228,7 +236,10 @@ async fn build_tool_call_uses_namespace_for_registry_name() -> anyhow::Result<()
     );
     assert_eq!(call.call_id, "call-namespace");
     assert_eq!(call.encrypted_function_args, Some(Vec::new()));
-    assert_eq!(call.direct_source(), ToolCallSource::Direct);
+    assert_eq!(
+        call.direct_source(&Default::default()),
+        ToolCallSource::Direct
+    );
     match call.payload {
         ToolPayload::Function { arguments } => {
             assert_eq!(arguments, "{}");
@@ -649,4 +660,81 @@ fn namespace_function_names(specs: &[ToolSpec], namespace_name: &str) -> Vec<Str
             | ToolSpec::Namespace(_) => None,
         })
         .unwrap_or_default()
+}
+
+#[test]
+fn plaintext_v2_classification_requires_configured_tool_identity() {
+    let config = crate::config::MultiAgentV2Config {
+        message_delivery: codex_features::MultiAgentMessageDelivery::Plaintext,
+        tool_namespace: Some("agents".to_string()),
+        ..Default::default()
+    };
+    for name in ["spawn_agent", "send_message", "followup_task"] {
+        for encrypted_function_args in [None, Some(vec![])] {
+            let call = ToolCall {
+                tool_name: ToolName::namespaced("agents", name),
+                call_id: "plaintext-call".to_string(),
+                payload: ToolPayload::Function {
+                    arguments: "{}".to_string(),
+                },
+                encrypted_function_args,
+            };
+            assert_eq!(
+                call.direct_source(&config),
+                ToolCallSource::DirectPlaintextMessage
+            );
+            assert!(call.validate_message_delivery(&config).is_ok());
+            assert_eq!(
+                call.direct_source(&Default::default()),
+                ToolCallSource::Direct
+            );
+        }
+    }
+    for (namespace, name) in [("other", "spawn_agent"), ("agents", "wait_agent")] {
+        let call = ToolCall {
+            tool_name: ToolName::namespaced(namespace, name),
+            call_id: "unrelated-call".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+            encrypted_function_args: None,
+        };
+        assert_eq!(call.direct_source(&config), ToolCallSource::Direct);
+    }
+}
+
+#[test]
+fn plaintext_v2_rejects_explicit_encrypted_arguments() {
+    let config = crate::config::MultiAgentV2Config {
+        message_delivery: codex_features::MultiAgentMessageDelivery::Plaintext,
+        tool_namespace: Some("agents".to_string()),
+        ..Default::default()
+    };
+    for name in ["spawn_agent", "send_message", "followup_task"] {
+        let call = ToolCall {
+            tool_name: ToolName::namespaced("agents", name),
+            call_id: "encrypted-call".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+            encrypted_function_args: Some(vec!["message".to_string()]),
+        };
+        assert!(call.validate_message_delivery(&config).is_err());
+        assert!(call.validate_message_delivery(&Default::default()).is_ok());
+    }
+}
+
+#[test]
+fn plaintext_v2_tool_logs_include_arguments_only_when_opted_in() {
+    let payload = ToolPayload::Function {
+        arguments: json!({"message":"readable task"}).to_string(),
+    };
+    assert_eq!(
+        tool_log_payload(
+            &payload,
+            &ToolCallSource::DirectPlaintextMessage,
+            codex_features::MultiAgentMessageDelivery::Plaintext
+        ),
+        payload.log_payload()
+    );
 }

@@ -12089,6 +12089,115 @@ smart_approvals = true
 }
 
 #[tokio::test]
+async fn multi_agent_v2_message_delivery_selects_default_namespace() -> std::io::Result<()> {
+    for (delivery, expected_delivery, expected_namespace) in [
+        ("", MultiAgentMessageDelivery::Encrypted, "collaboration"),
+        (
+            "message_delivery = \"encrypted\"",
+            MultiAgentMessageDelivery::Encrypted,
+            "collaboration",
+        ),
+        (
+            "message_delivery = \"plaintext\"",
+            MultiAgentMessageDelivery::Plaintext,
+            "agents",
+        ),
+    ] {
+        let codex_home = TempDir::new()?;
+        std::fs::write(
+            codex_home.path().join(CONFIG_TOML_FILE),
+            format!("[features.multi_agent_v2]\nenabled = true\n{delivery}\n"),
+        )?;
+
+        let config = ConfigBuilder::without_managed_config_for_tests()
+            .codex_home(codex_home.path().to_path_buf())
+            .fallback_cwd(Some(codex_home.path().to_path_buf()))
+            .build()
+            .await?;
+
+        assert_eq!(config.multi_agent_v2.message_delivery, expected_delivery);
+        assert_eq!(
+            config.multi_agent_v2.tool_namespace.as_deref(),
+            Some(expected_namespace)
+        );
+    }
+
+    assert_eq!(
+        MultiAgentV2Config::default().message_delivery,
+        MultiAgentMessageDelivery::Encrypted
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn multi_agent_v2_plaintext_preserves_explicit_namespace() -> std::io::Result<()> {
+    for namespace in ["agents", "custom_agents"] {
+        let codex_home = TempDir::new()?;
+        std::fs::write(
+            codex_home.path().join(CONFIG_TOML_FILE),
+            format!(
+                "[features.multi_agent_v2]\nenabled = true\nmessage_delivery = \"plaintext\"\ntool_namespace = \"{namespace}\"\n"
+            ),
+        )?;
+        let config = ConfigBuilder::without_managed_config_for_tests()
+            .codex_home(codex_home.path().to_path_buf())
+            .fallback_cwd(Some(codex_home.path().to_path_buf()))
+            .build()
+            .await?;
+
+        assert_eq!(
+            config.multi_agent_v2.message_delivery,
+            MultiAgentMessageDelivery::Plaintext
+        );
+        assert_eq!(
+            config.multi_agent_v2.tool_namespace.as_deref(),
+            Some(namespace)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn multi_agent_v2_plaintext_rejects_collaboration_namespace() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"[features.multi_agent_v2]
+enabled = true
+message_delivery = "plaintext"
+tool_namespace = "collaboration"
+"#,
+    )?;
+    let err = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await
+        .expect_err("plaintext messages must not use the reserved collaboration namespace");
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        err.to_string()
+            .contains("features.multi_agent_v2.tool_namespace")
+    );
+    assert!(err.to_string().contains("plaintext"));
+    assert!(err.to_string().contains("agents"));
+    Ok(())
+}
+
+#[test]
+fn multi_agent_v2_message_delivery_rejects_unknown_values() {
+    assert!(
+        toml::from_str::<ConfigToml>(
+            r#"[features.multi_agent_v2]
+message_delivery = "automatic"
+"#,
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
 async fn multi_agent_v2_config_from_feature_table() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(

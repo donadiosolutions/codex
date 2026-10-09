@@ -53,7 +53,44 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
-    pub(crate) fn direct_source(&self) -> ToolCallSource {
+    fn plaintext_message_tool(&self, config: &crate::config::MultiAgentV2Config) -> bool {
+        config.message_delivery == codex_features::MultiAgentMessageDelivery::Plaintext
+            && self.tool_name.namespace.as_deref() == config.tool_namespace.as_deref()
+            && matches!(
+                self.tool_name.name.as_str(),
+                "spawn_agent" | "send_message" | "followup_task"
+            )
+    }
+
+    pub(crate) fn validate_message_delivery(
+        &self,
+        config: &crate::config::MultiAgentV2Config,
+    ) -> Result<(), FunctionCallError> {
+        if self.plaintext_message_tool(config)
+            && self
+                .encrypted_function_args
+                .as_ref()
+                .is_some_and(|args| !args.is_empty())
+        {
+            return Err(FunctionCallError::RespondToModel(
+                "Plaintext V2 delivery received encrypted arguments; no agent action was performed. Use a provider route that supports plaintext tool parameters.".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn direct_source(
+        &self,
+        config: &crate::config::MultiAgentV2Config,
+    ) -> ToolCallSource {
+        if self.plaintext_message_tool(config)
+            && self
+                .encrypted_function_args
+                .as_ref()
+                .is_none_or(Vec::is_empty)
+        {
+            return ToolCallSource::DirectPlaintextMessage;
+        }
         if self.tool_name.namespace.as_deref() == Some("collaboration")
             && matches!(
                 self.tool_name.name.as_str(),
@@ -74,8 +111,11 @@ impl ToolCall {
 pub(crate) fn tool_log_payload<'a>(
     payload: &'a ToolPayload,
     source: &ToolCallSource,
+    message_delivery: codex_features::MultiAgentMessageDelivery,
 ) -> Cow<'a, str> {
-    if matches!(source, ToolCallSource::DirectPlaintextMessage) {
+    if matches!(source, ToolCallSource::DirectPlaintextMessage)
+        && message_delivery == codex_features::MultiAgentMessageDelivery::Encrypted
+    {
         return Cow::Borrowed("[plaintext arguments]");
     }
     payload.log_payload()

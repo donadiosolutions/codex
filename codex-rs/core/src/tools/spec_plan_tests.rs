@@ -3392,3 +3392,32 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
 
 #[path = "spec_plan_strict_third_party_tests.rs"]
 mod strict_third_party;
+
+#[tokio::test]
+async fn multi_agent_v2_plaintext_message_schemas_use_configured_namespace() {
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, true);
+        update_config(turn, |config| {
+            config.multi_agent_v2.message_delivery =
+                codex_features::MultiAgentMessageDelivery::Plaintext;
+            config.multi_agent_v2.tool_namespace = Some("agents".to_string());
+        });
+    })
+    .await;
+    let ToolSpec::Namespace(namespace) = plan.visible_spec("agents") else {
+        panic!("agents namespace");
+    };
+    for name in ["spawn_agent", "send_message", "followup_task"] {
+        let tool = namespace
+            .tools
+            .iter()
+            .find_map(|tool| match tool {
+                ResponsesApiNamespaceTool::Function(tool) if tool.name == name => Some(tool),
+                _ => None,
+            })
+            .expect("message tool");
+        let schema = serde_json::to_value(&tool.parameters).unwrap();
+        assert_eq!(schema["properties"]["message"]["type"], "string");
+        assert!(schema["properties"]["message"].get("encrypted").is_none());
+    }
+}

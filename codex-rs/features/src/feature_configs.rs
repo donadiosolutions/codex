@@ -284,11 +284,23 @@ where
     Ok(feature)
 }
 
+/// Delivery format for newly sent multi-agent v2 messages.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MultiAgentMessageDelivery {
+    #[default]
+    Encrypted,
+    Plaintext,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MultiAgentV2ConfigToml {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// Send new messages encrypted (default) or as readable plaintext.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_delivery: Option<MultiAgentMessageDelivery>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub max_concurrent_threads_per_session: Option<usize>,
@@ -315,6 +327,7 @@ pub struct MultiAgentV2ConfigToml {
     pub subagent_developer_instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multi_agent_mode_hint_text: Option<String>,
+    /// Defaults to `agents` for plaintext delivery and `collaboration` otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 64), regex(pattern = r"^[a-zA-Z0-9_-]+$"))]
     pub tool_namespace: Option<String>,

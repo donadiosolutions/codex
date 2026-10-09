@@ -66,7 +66,11 @@ pub(super) async fn handle_message_string_tool(
             target: AgentTarget::Id(receiver_thread_id),
             resume_config,
             input: AgentInput::Message {
-                message: agent_message_from_tool(message, &source),
+                message: agent_message_from_tool(
+                    message,
+                    &source,
+                    turn.config.multi_agent_v2.message_delivery,
+                ),
                 mode,
             },
             start_options: TurnStartOptions {

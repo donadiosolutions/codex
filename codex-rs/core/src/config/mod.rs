@@ -73,6 +73,7 @@ use codex_features::FeatureOverrides;
 use codex_features::FeatureToml;
 use codex_features::Features;
 use codex_features::FeaturesToml;
+use codex_features::MultiAgentMessageDelivery;
 use codex_features::MultiAgentV2ConfigToml;
 use codex_features::NetworkProxyConfigToml;
 use codex_features::SleepToolMode;
@@ -1345,6 +1346,7 @@ impl Default for CurrentTimeReminderConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MultiAgentV2Config {
+    pub message_delivery: MultiAgentMessageDelivery,
     pub max_concurrent_threads_per_session: usize,
     pub min_wait_timeout_ms: i64,
     pub max_wait_timeout_ms: i64,
@@ -1367,6 +1369,7 @@ pub struct MultiAgentV2Config {
 impl MultiAgentV2Config {
     fn defaults_for_max_concurrency(max_concurrent_threads_per_session: usize) -> Self {
         Self {
+            message_delivery: MultiAgentMessageDelivery::default(),
             max_concurrent_threads_per_session,
             min_wait_timeout_ms: DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS,
             max_wait_timeout_ms: DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS,
@@ -2793,6 +2796,9 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
         .unwrap_or(DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION);
     let default =
         MultiAgentV2Config::defaults_for_max_concurrency(max_concurrent_threads_per_session);
+    let message_delivery = base
+        .and_then(|config| config.message_delivery)
+        .unwrap_or(default.message_delivery);
     let min_wait_timeout_ms = base
         .and_then(|config| config.min_wait_timeout_ms)
         .unwrap_or(default.min_wait_timeout_ms);
@@ -2837,12 +2843,16 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
     let tool_namespace = base
         .and_then(|config| config.tool_namespace.as_ref())
         .cloned()
-        .or(default.tool_namespace);
+        .or_else(|| match message_delivery {
+            MultiAgentMessageDelivery::Encrypted => default.tool_namespace,
+            MultiAgentMessageDelivery::Plaintext => Some("agents".to_string()),
+        });
     let non_code_mode_only = base
         .and_then(|config| config.non_code_mode_only)
         .unwrap_or(default.non_code_mode_only);
 
     MultiAgentV2Config {
+        message_delivery,
         max_concurrent_threads_per_session,
         min_wait_timeout_ms,
         max_wait_timeout_ms,
@@ -3902,6 +3912,14 @@ impl Config {
             ));
         }
         validate_multi_agent_v2_tool_namespace(multi_agent_v2.tool_namespace.as_deref())?;
+        if multi_agent_v2.message_delivery == MultiAgentMessageDelivery::Plaintext
+            && multi_agent_v2.tool_namespace.as_deref() == Some("collaboration")
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "features.multi_agent_v2.tool_namespace cannot be collaboration with plaintext message_delivery; use agents or another namespace, or omit tool_namespace",
+            ));
+        }
         let agents_enabled = cfg
             .agents
             .as_ref()
