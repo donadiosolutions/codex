@@ -85,8 +85,18 @@ PKG
   # Source identity and patch come from upstream's existing zsh release recipe.
   zsh_commit="$(sed -n 's/^  ZSH_COMMIT: //p' /workflow/.github/workflows/rust-release-zsh.yml)"
   [[ "$zsh_commit" =~ ^[0-9a-f]{40}$ ]]
-  GITHUB_WORKSPACE="$source_root" RUNNER_TEMP=/bench ZSH_COMMIT="$zsh_commit" \
-    ZSH_PATCH=codex-rs/shell-escalation/patches/zsh-exec-wrapper.patch ZSH_BUILD_JOBS=16 \
+  zsh_workspace="$source_root"
+  zsh_patch=codex-rs/shell-escalation/patches/zsh-exec-wrapper.patch
+  if [[ ! -f "$zsh_workspace/$zsh_patch" ]]; then
+    # Upstream removed the backend in cd85a26, but still ships the zsh payload.
+    # Preserve the exact patch blob from e89e5136bdd11931bb143fcafa2e89cc8313e99b.
+    zsh_workspace=/workflow
+    zsh_patch=.github/scripts/zsh-exec-wrapper.patch
+    printf '%s  %s\n' 696b7d923b8071554d00e811afb9a08fcad4baada796f7314d12ecd72d06152c \
+      "$zsh_workspace/$zsh_patch" | sha256sum --check -
+  fi
+  GITHUB_WORKSPACE="$zsh_workspace" RUNNER_TEMP=/bench ZSH_COMMIT="$zsh_commit" \
+    ZSH_PATCH="$zsh_patch" ZSH_BUILD_JOBS=16 \
     bash /workflow/.github/scripts/build-zsh-release-artifact.sh /bench/zsh.tar.gz \
     > /bench/zsh-build.log 2>&1
   mkdir /bench/zsh
