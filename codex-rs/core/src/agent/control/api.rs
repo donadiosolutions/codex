@@ -89,7 +89,8 @@ impl AgentControl for LocalAgentControl {
                         })?;
                     SpawnInitialInput::InterAgentCommunication(
                         message.into_communication(author, recipient, mode),
-                        AgentCommunicationContext::new(AgentCommunicationKind::Spawn, caller),
+                        AgentCommunicationContext::new(AgentCommunicationKind::Spawn, caller)
+                            .with_message_delivery(config.multi_agent_v2.message_delivery),
                     )
                 }
             };
@@ -106,6 +107,7 @@ impl AgentControl for LocalAgentControl {
                 input,
                 mut start_options,
             } = request;
+            let message_delivery = resume_config.multi_agent_v2.message_delivery;
             let target = self.resolve_target(caller, &target)?;
             let (metadata, submission_id) = match input {
                 AgentInput::UserInput(input) => {
@@ -163,7 +165,8 @@ impl AgentControl for LocalAgentControl {
                         .send_inter_agent_communication(
                             target,
                             communication,
-                            AgentCommunicationContext::new(kind, caller),
+                            AgentCommunicationContext::new(kind, caller)
+                                .with_message_delivery(message_delivery),
                             start_options,
                         )
                         .await?;

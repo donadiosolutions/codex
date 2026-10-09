@@ -4704,3 +4704,286 @@ async fn build_agent_resume_config_clears_base_instructions() {
         .expect("approval policy set");
     assert_eq!(config, expected);
 }
+
+#[test_case::test_case(false; "direct")]
+#[test_case::test_case(true; "code_mode")]
+#[tokio::test]
+async fn multi_agent_v2_plaintext_delivery_preserves_messages_and_wake_mode(code_mode: bool) {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        task_name: String,
+        nickname: Option<String>,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    set_agent_control(&mut session, manager.agent_control());
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.multi_agent_v2.message_delivery = codex_features::MultiAgentMessageDelivery::Plaintext;
+    config.multi_agent_v2.tool_namespace = Some("agents".to_string());
+    set_turn_config(&mut turn, config);
+
+    // V2 tools and model context must use the controller's tree, even when the
+    // caller's local runtime has no registry entries.
+    session.services.local_agent_runtime = crate::agent::LocalAgentControl::default().runtime;
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let make_invocation = |name: &str, args| {
+        let mut call = invocation(session.clone(), turn.clone(), name, function_payload(args));
+        if code_mode {
+            call.source = crate::tools::context::ToolCallSource::CodeMode {
+                cell_id: "cell-plaintext".to_string(),
+                runtime_tool_call_id: "nested-plaintext".to_string(),
+            };
+        }
+        call
+    };
+    let spawn_output = SpawnAgentHandlerV2::default()
+        .handle(make_invocation("spawn_agent", json!({"message": "readable spawn task", "task_name": "test_process", "fork_turns": "none"})))
+        .await
+        .expect("spawn_agent should succeed");
+    let (content, _) = expect_text_output(spawn_output);
+    let spawn_result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn result should parse");
+    assert_eq!(spawn_result.task_name, "/root/test_process");
+    assert_eq!(spawn_result.nickname, None);
+
+    let child_thread_id = session
+        .services
+        .agent_control
+        .resolve(
+            session.thread_id,
+            turn.parent_thread_id,
+            &turn.session_source,
+            "test_process",
+        )
+        .await
+        .expect("relative path should resolve");
+    let child_snapshot = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist")
+        .config_snapshot()
+        .await;
+    assert_eq!(
+        child_snapshot.session_source.get_agent_path().as_deref(),
+        Some("/root/test_process")
+    );
+    assert!(manager.captured_ops().iter().any(|(id, op)| {
+        *id == child_thread_id
+            && matches!(
+                op,
+                Op::InterAgentCommunication { communication, .. }
+                    if communication.author == AgentPath::root()
+                        && communication.recipient.as_str() == "/root/test_process"
+                        && communication.other_recipients.is_empty()
+                        && communication.content == "Message Type: NEW_TASK\nTask name: /root/test_process\nSender: /root\nPayload:\nreadable spawn task"
+                        && communication.encrypted_content.is_none()
+                        && communication.trigger_turn
+            )
+    }));
+
+    let step_context = StepContext::for_test(Arc::clone(&turn));
+    let world_state = session
+        .build_world_state_for_step(&step_context, /*new_window*/ true)
+        .await
+        .expect("world state should build");
+    assert_eq!(
+        world_state.render_full().0.into_object()["environments"]["subagents"],
+        json!(r#"<agent name="/root/test_process" />"#),
+    );
+
+    SendMessageHandlerV2
+        .handle(make_invocation(
+            "send_message",
+            json!({"target": "test_process", "message": "readable queued message"}),
+        ))
+        .await
+        .expect("send_message should accept v2 path");
+
+    assert!(manager.captured_ops().iter().any(|(id, op)| {
+        *id == child_thread_id
+            && matches!(
+                op,
+                Op::InterAgentCommunication { communication, .. }
+                    if communication.author == AgentPath::root()
+                        && communication.recipient.as_str() == "/root/test_process"
+                        && communication.other_recipients.is_empty()
+                        && communication.content == "Message Type: MESSAGE\nTask name: /root/test_process\nSender: /root\nPayload:\nreadable queued message"
+                        && communication.encrypted_content.is_none()
+                        && !communication.trigger_turn
+            )
+    }));
+
+    FollowupTaskHandlerV2
+        .handle(make_invocation(
+            "followup_task",
+            json!({"target":"test_process", "message":"readable followup"}),
+        ))
+        .await
+        .expect("followup should wake the same child");
+    assert!(manager.captured_ops().iter().any(|(id, op)| {
+        *id == child_thread_id && matches!(op, Op::InterAgentCommunication { communication, .. }
+            if communication.content == "Message Type: NEW_TASK\nTask name: /root/test_process\nSender: /root\nPayload:\nreadable followup"
+                && communication.encrypted_content.is_none() && communication.trigger_turn)
+    }));
+}
+
+#[tokio::test]
+async fn plaintext_v2_policy_is_inherited_by_spawn_and_resume_configs() {
+    let (_, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.multi_agent_v2.message_delivery = codex_features::MultiAgentMessageDelivery::Plaintext;
+    config.multi_agent_v2.tool_namespace = Some("agents".to_string());
+    set_turn_config(&mut turn, config);
+    let turn = Arc::new(turn);
+    let step = StepContext::for_test(Arc::clone(&turn));
+    let base = BaseInstructions {
+        text: "base".to_string(),
+        ..Default::default()
+    };
+    for config in [
+        build_agent_spawn_config(&base, &step).unwrap(),
+        build_agent_resume_config(&turn).unwrap(),
+    ] {
+        assert_eq!(
+            config.multi_agent_v2.message_delivery,
+            codex_features::MultiAgentMessageDelivery::Plaintext
+        );
+        assert_eq!(
+            config.multi_agent_v2.tool_namespace.as_deref(),
+            Some("agents")
+        );
+    }
+}
+
+#[test_case::test_case(false; "direct")]
+#[test_case::test_case(true; "code_mode")]
+#[tokio::test]
+async fn plaintext_v2_encrypted_arguments_are_rejected_before_dispatch(code_mode: bool) {
+    use crate::tools::multi_agent_tool::multi_agent_v2_handler;
+    use crate::tools::parallel::ToolCallRuntime;
+    use crate::tools::registry::ToolRegistry;
+    use crate::tools::router::ToolCall;
+    use crate::tools::router::ToolRouter;
+    use codex_features::MultiAgentMessageDelivery;
+    use codex_protocol::openai_models::ToolMode;
+    use codex_tools::ToolName;
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .unwrap();
+    set_agent_control(&mut session, manager.agent_control());
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config.features.enable(Feature::MultiAgentV2).unwrap();
+    config.multi_agent_v2.message_delivery = MultiAgentMessageDelivery::Plaintext;
+    config.multi_agent_v2.tool_namespace = Some("agents".to_string());
+    set_turn_config(&mut turn, config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let router = Arc::new(ToolRouter::from_parts(
+        ToolRegistry::from_tools([
+            multi_agent_v2_handler(
+                SpawnAgentHandlerV2::default(),
+                Some("agents"),
+                None,
+                None,
+                MultiAgentMessageDelivery::Plaintext,
+            ),
+            multi_agent_v2_handler(
+                SendMessageHandlerV2,
+                Some("agents"),
+                None,
+                None,
+                MultiAgentMessageDelivery::Plaintext,
+            ),
+            multi_agent_v2_handler(
+                FollowupTaskHandlerV2,
+                Some("agents"),
+                None,
+                None,
+                MultiAgentMessageDelivery::Plaintext,
+            ),
+        ]),
+        Vec::new(),
+        ToolMode::Direct,
+        BTreeMap::new(),
+        None,
+        &[],
+    ));
+    let step = StepContext::for_test(turn).with_tool_router_for_test(router);
+    let before = manager.captured_ops().len();
+    for name in ["spawn_agent", "send_message", "followup_task"] {
+        let call = ToolCall {
+            tool_name: ToolName::namespaced("agents", name),
+            call_id: format!("encrypted-{name}"),
+            payload: function_payload(if name == "spawn_agent" {
+                json!({"task_name":"must_not_start", "message":"opaque"})
+            } else {
+                json!({"target":"must_not_start", "message":"opaque"})
+            }),
+            encrypted_function_args: Some(vec!["message".to_string()]),
+        };
+        let runtime = ToolCallRuntime::new(
+            session.clone(),
+            step.clone(),
+            Arc::new(Mutex::new(TurnDiffTracker::default())),
+        );
+        let error = if code_mode {
+            let result = runtime
+                .handle_tool_call_with_source(
+                    step.clone(),
+                    call,
+                    crate::tools::context::ToolCallSource::CodeMode {
+                        cell_id: "cell".to_string(),
+                        runtime_tool_call_id: "nested".to_string(),
+                    },
+                    CancellationToken::new(),
+                    Arc::new(crate::tools::context::ToolCallState::default()),
+                )
+                .await;
+            match result {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("encrypted dispatch succeeded"),
+            }
+        } else {
+            let result = runtime
+                .handle_tool_call(call, CancellationToken::new())
+                .await
+                .unwrap();
+            serde_json::to_string(&result.item).unwrap()
+        };
+        assert!(
+            error.contains("Plaintext V2 delivery received encrypted arguments"),
+            "{error}"
+        );
+        assert_eq!(manager.captured_ops().len(), before);
+    }
+    assert!(
+        session
+            .services
+            .agent_control
+            .resolve(
+                session.thread_id,
+                None,
+                &step.turn.session_source,
+                "must_not_start"
+            )
+            .await
+            .is_err()
+    );
+}

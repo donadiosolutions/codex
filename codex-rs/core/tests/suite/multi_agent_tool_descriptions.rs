@@ -54,6 +54,8 @@ enum Exposure {
     Plain,
     CodeMode,
     V1,
+    PlaintextNamespaced,
+    PlaintextCodeMode,
 }
 
 fn all_tool_messages(message: Value) -> Value {
@@ -103,6 +105,8 @@ fn all_tool_messages(message: Value) -> Value {
     "followup_task": {"parameters": r#"{"type":"object"}"#}
 }}), Exposure::Namespaced, None; "missing_encrypted_parameters_fall_back")]
 #[test_case(json!({"multi_agent": {"send_message": {"parameters": CATALOG_PARAMETERS}}}), Exposure::Namespaced, Some(EXPECTED_CATALOG_PARAMETERS); "sparse_parameters")]
+#[test_case(all_tool_messages(json!({"parameters": CATALOG_PARAMETERS.replace("\"encrypted\": false", "\"encrypted\": true")})), Exposure::PlaintextNamespaced, Some(EXPECTED_CATALOG_PARAMETERS); "plaintext_catalog_encryption_removed")]
+#[test_case(all_tool_messages(json!({"parameters": CATALOG_PARAMETERS.replace("\"encrypted\": false", "\"encrypted\": true")})), Exposure::PlaintextCodeMode, Some(EXPECTED_CATALOG_PARAMETERS); "plaintext_code_mode_encryption_removed")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multi_agent_catalog_messages_change_only_selected_tool_fields(
     tool_messages: Value,
@@ -143,7 +147,7 @@ async fn multi_agent_catalog_messages_change_only_selected_tool_fields(
                         .enable(Feature::MultiAgentV2)
                         .expect("enable V2");
                 }
-                if matches!(exposure, Exposure::CodeMode) {
+                if matches!(exposure, Exposure::CodeMode | Exposure::PlaintextCodeMode) {
                     config
                         .features
                         .enable(Feature::CodeMode)
@@ -154,6 +158,13 @@ async fn multi_agent_catalog_messages_change_only_selected_tool_fields(
                 }
                 config.multi_agent_v2.tool_namespace =
                     (!matches!(exposure, Exposure::Plain)).then(|| "delegation".to_string());
+                if matches!(
+                    exposure,
+                    Exposure::PlaintextNamespaced | Exposure::PlaintextCodeMode
+                ) {
+                    config.multi_agent_v2.message_delivery =
+                        codex_features::MultiAgentMessageDelivery::Plaintext;
+                }
                 config.multi_agent_v2.hide_spawn_agent_metadata = false;
                 config.multi_agent_v2.expose_spawn_agent_model_overrides = true;
                 config.multi_agent_v2.usage_hint_text = Some("Local delegation hint.".to_string());
@@ -217,7 +228,7 @@ async fn multi_agent_catalog_messages_change_only_selected_tool_fields(
                     .find("\n\nexec tool declaration:")
                     .map(|index| &bundled[index..])
                     .unwrap_or_default();
-                if matches!(exposure, Exposure::CodeMode) {
+                if matches!(exposure, Exposure::CodeMode | Exposure::PlaintextCodeMode) {
                     assert!(
                         declaration.contains(&format!("delegation__{name}")),
                         "Code Mode description for {name}: {bundled}"
@@ -248,10 +259,27 @@ async fn multi_agent_catalog_messages_change_only_selected_tool_fields(
                 && tool_messages["multi_agent"][name]["parameters"].is_string()
             {
                 expected_tool["parameters"] = serde_json::from_str(parameters)?;
-                if matches!(name, "spawn_agent" | "send_message" | "followup_task") {
+                if matches!(
+                    exposure,
+                    Exposure::PlaintextNamespaced | Exposure::PlaintextCodeMode
+                ) {
                     expected_tool["parameters"]["properties"]["message"]["encrypted"] = json!(true);
                 }
-                if matches!(exposure, Exposure::CodeMode) {
+                if matches!(name, "spawn_agent" | "send_message" | "followup_task") {
+                    if matches!(
+                        exposure,
+                        Exposure::PlaintextNamespaced | Exposure::PlaintextCodeMode
+                    ) {
+                        expected_tool["parameters"]["properties"]["message"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("encrypted");
+                    } else {
+                        expected_tool["parameters"]["properties"]["message"]["encrypted"] =
+                            json!(true);
+                    }
+                }
+                if matches!(exposure, Exposure::CodeMode | Exposure::PlaintextCodeMode) {
                     let description = expected_tool["description"].as_str().expect("description");
                     let (prefix, signature) =
                         description.rsplit_once("(args: ").expect("arguments");
@@ -332,7 +360,7 @@ async fn channel_catalog_descriptions_change_only_selected_tools(exposure: Expos
                     .enable(Feature::AgentMessageBoard)
                     .expect("enable channels");
                 config.multi_agent_v2.tool_namespace = Some("delegation".into());
-                if matches!(exposure, Exposure::CodeMode) {
+                if matches!(exposure, Exposure::CodeMode | Exposure::PlaintextCodeMode) {
                     config
                         .features
                         .enable(Feature::CodeMode)
@@ -366,14 +394,15 @@ async fn channel_catalog_descriptions_change_only_selected_tools(exposure: Expos
                 .expect(name);
             let bundled = tool["description"].as_str().expect("bundled description");
             if let Some(description) = message["multi_agent"][name]["description"].as_str() {
-                let declaration = if matches!(exposure, Exposure::CodeMode) {
-                    let offset = bundled
-                        .find("\n\nexec tool declaration:")
-                        .expect("Code Mode declaration");
-                    &bundled[offset..]
-                } else {
-                    ""
-                };
+                let declaration =
+                    if matches!(exposure, Exposure::CodeMode | Exposure::PlaintextCodeMode) {
+                        let offset = bundled
+                            .find("\n\nexec tool declaration:")
+                            .expect("Code Mode declaration");
+                        &bundled[offset..]
+                    } else {
+                        ""
+                    };
                 tool["description"] = json!(format!("{description}{declaration}"));
             }
         }

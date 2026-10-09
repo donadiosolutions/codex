@@ -537,6 +537,17 @@ impl LocalAgentControl {
                 );
                 let context =
                     AgentCommunicationContext::new(AgentCommunicationKind::Result, child_thread_id);
+                let context = match child_thread.as_ref() {
+                    Some(child_thread) => context.with_message_delivery(
+                        child_thread
+                            .session
+                            .get_config()
+                            .await
+                            .multi_agent_v2
+                            .message_delivery,
+                    ),
+                    None => context,
+                };
                 let _ = control
                     .send_inter_agent_communication(
                         parent_thread_id,

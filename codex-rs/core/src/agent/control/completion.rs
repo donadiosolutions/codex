@@ -117,7 +117,8 @@ impl LocalAgentControl {
             /*trigger_turn*/ false,
         );
         let context =
-            AgentCommunicationContext::new(AgentCommunicationKind::Result, outcome.thread_id);
+            AgentCommunicationContext::new(AgentCommunicationKind::Result, outcome.thread_id)
+                .with_message_delivery(outcome.message_delivery);
         let delivery = self
             .send_inter_agent_communication(
                 parent_thread_id,

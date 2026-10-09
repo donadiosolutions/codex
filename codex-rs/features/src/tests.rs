@@ -746,6 +746,7 @@ fn multi_agent_v2_feature_config_deserializes_table() {
         r#"
 [multi_agent_v2]
 enabled = true
+message_delivery = "plaintext"
 max_concurrent_threads_per_session = 4
 min_wait_timeout_ms = 2500
 max_wait_timeout_ms = 120000
@@ -775,6 +776,7 @@ non_code_mode_only = true
         features.multi_agent_v2,
         Some(crate::FeatureToml::Config(crate::MultiAgentV2ConfigToml {
             enabled: Some(true),
+            message_delivery: Some(crate::MultiAgentMessageDelivery::Plaintext),
             max_concurrent_threads_per_session: Some(4),
             min_wait_timeout_ms: Some(2500),
             max_wait_timeout_ms: Some(120000),
@@ -795,6 +797,30 @@ non_code_mode_only = true
             non_code_mode_only: Some(true),
         }))
     );
+}
+
+#[test]
+fn multi_agent_v2_message_delivery_serializes_snake_case() {
+    for (delivery, expected) in [
+        (crate::MultiAgentMessageDelivery::Encrypted, "encrypted"),
+        (crate::MultiAgentMessageDelivery::Plaintext, "plaintext"),
+    ] {
+        let config = crate::MultiAgentV2ConfigToml {
+            message_delivery: Some(delivery),
+            ..Default::default()
+        };
+        let serialized = toml::to_string(&config).expect("delivery config should serialize");
+        let value: TomlValue = toml::from_str(&serialized).expect("serialized config should parse");
+        assert_eq!(value["message_delivery"].as_str(), Some(expected));
+    }
+}
+
+#[test]
+fn multi_agent_v2_message_delivery_rejects_unknown_values() {
+    let err = toml::from_str::<crate::MultiAgentV2ConfigToml>("message_delivery = 'automatic'")
+        .expect_err("unknown delivery mode should fail config parsing");
+    assert!(err.to_string().contains("encrypted"));
+    assert!(err.to_string().contains("plaintext"));
 }
 
 #[test]

@@ -81,7 +81,7 @@ impl ToolCallRuntime {
         cancellation_token: CancellationToken,
     ) -> impl std::future::Future<Output = Result<ResponseItemEnvelope, CodexErr>> {
         let error_call = call.clone();
-        let source = call.direct_source();
+        let source = call.direct_source(&self.step_context.turn.config.multi_agent_v2);
         let recorder = self.session.services.executed_tool_calls.clone();
         let recorded_call = recorder.prepare_direct_call(&call, &source, &self.step_context);
         let step_context = Arc::clone(&self.step_context);
@@ -131,8 +131,11 @@ impl ToolCallRuntime {
         cancellation_token: CancellationToken,
         call_state: Arc<ToolCallState>,
     ) -> impl std::future::Future<Output = Result<AnyToolResult, FunctionCallError>> {
-        let message_admission =
-            super::user_messaging::admit_code_mode_send(&self.session, &source, &call.tool_name);
+        let message_admission = call
+            .validate_message_delivery(&step_context.turn.config.multi_agent_v2)
+            .and_then(|()| {
+                super::user_messaging::admit_code_mode_send(&self.session, &source, &call.tool_name)
+            });
         self.session
             .services
             .executed_tool_calls

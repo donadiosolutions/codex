@@ -1,9 +1,10 @@
 //! Applies captured Multi-Agent V2 catalog overrides and namespaces to tool specifications.
-//! Parameter schemas retain harness-owned encryption annotations; execution is unchanged.
+//! Parameter transport follows the configured delivery policy after catalog overrides.
 
 use crate::session::session::Session;
 use crate::tools::context::ToolInvocation;
 use crate::tools::registry::CoreToolRuntime;
+use codex_features::MultiAgentMessageDelivery;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
@@ -23,13 +24,15 @@ pub(super) fn multi_agent_v2_handler(
     namespace: Option<&str>,
     description_override: Option<&str>,
     parameters_override: Option<&str>,
+    message_delivery: MultiAgentMessageDelivery,
 ) -> Arc<dyn CoreToolRuntime> {
     let parameters_override = parameters_override.map(|parameters| -> Result<JsonSchema, &str> {
         let mut parameters = super::catalog_parameters::parse(parameters)?;
         if let ToolSpec::Function(tool) = handler.spec()
             && let Some(properties) = tool.parameters.properties
         {
-            // Argument transport requires these markers even without server encryption config.
+            // Validate catalog parameters against the bundled transport contract.
+            // The selected delivery policy is applied to the final schema below.
             for (name, schema) in properties {
                 if schema.encrypted == Some(true) {
                     let property = parameters
@@ -47,7 +50,11 @@ pub(super) fn multi_agent_v2_handler(
         tracing::warn!(tool = %handler.tool_name(), reason, "Invalid catalog tool parameters; using bundled parameters");
     }
     let parameters_override = parameters_override.and_then(Result::ok);
-    if namespace.is_none() && description_override.is_none() && parameters_override.is_none() {
+    if namespace.is_none()
+        && description_override.is_none()
+        && parameters_override.is_none()
+        && message_delivery == MultiAgentMessageDelivery::Encrypted
+    {
         return Arc::new(handler);
     }
     Arc::new(MultiAgentV2ToolOverrides {
@@ -55,6 +62,7 @@ pub(super) fn multi_agent_v2_handler(
         namespace: namespace.map(str::to_owned),
         description_override: description_override.map(str::to_owned),
         parameters_override,
+        message_delivery,
     })
 }
 
@@ -63,6 +71,7 @@ struct MultiAgentV2ToolOverrides {
     namespace: Option<String>,
     description_override: Option<String>,
     parameters_override: Option<JsonSchema>,
+    message_delivery: MultiAgentMessageDelivery,
 }
 
 impl ToolExecutor<ToolInvocation> for MultiAgentV2ToolOverrides {
@@ -82,6 +91,19 @@ impl ToolExecutor<ToolInvocation> for MultiAgentV2ToolOverrides {
             }
             if let Some(parameters) = &self.parameters_override {
                 tool.parameters.clone_from(parameters);
+            }
+            if self.message_delivery == MultiAgentMessageDelivery::Plaintext
+                && matches!(
+                    tool.name.as_str(),
+                    "spawn_agent" | "send_message" | "followup_task"
+                )
+                && let Some(message) = tool
+                    .parameters
+                    .properties
+                    .as_mut()
+                    .and_then(|p| p.get_mut("message"))
+            {
+                message.encrypted = None;
             }
         }
         match (&self.namespace, spec) {
@@ -129,5 +151,58 @@ impl CoreToolRuntime for MultiAgentV2ToolOverrides {
         &self,
     ) -> Option<Box<dyn crate::tools::registry::ToolArgumentDiffConsumer>> {
         self.handler.create_diff_consumer()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler;
+    use crate::tools::handlers::multi_agents_v2::SendMessageHandler;
+    use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler;
+    use codex_features::MultiAgentMessageDelivery;
+
+    fn assert_plaintext(tool: Arc<dyn CoreToolRuntime>) {
+        let ToolSpec::Namespace(namespace) = tool.spec() else {
+            panic!("namespace");
+        };
+        let ResponsesApiNamespaceTool::Function(function) = &namespace.tools[0] else {
+            panic!("function");
+        };
+        let value = serde_json::to_value(&function.parameters).unwrap();
+        assert_eq!(value["properties"]["message"]["type"], "string");
+        assert!(value["properties"]["message"].get("encrypted").is_none());
+    }
+
+    #[test]
+    fn plaintext_v2_overrides_bundled_and_catalog_encryption() {
+        for parameters in [
+            None,
+            Some(
+                r#"{"type":"object","properties":{"message":{"type":"string","encrypted":true}},"required":["message"]}"#,
+            ),
+        ] {
+            assert_plaintext(multi_agent_v2_handler(
+                SpawnAgentHandler::default(),
+                Some("agents"),
+                None,
+                parameters,
+                MultiAgentMessageDelivery::Plaintext,
+            ));
+            assert_plaintext(multi_agent_v2_handler(
+                SendMessageHandler,
+                Some("agents"),
+                None,
+                parameters,
+                MultiAgentMessageDelivery::Plaintext,
+            ));
+            assert_plaintext(multi_agent_v2_handler(
+                FollowupTaskHandler,
+                Some("agents"),
+                None,
+                parameters,
+                MultiAgentMessageDelivery::Plaintext,
+            ));
+        }
     }
 }

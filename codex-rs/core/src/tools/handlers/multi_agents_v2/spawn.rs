@@ -189,7 +189,11 @@ async fn handle_spawn_agent(
             caller: session.thread_id,
             config,
             input: AgentInput::Message {
-                message: agent_message_from_tool(message, &source),
+                message: agent_message_from_tool(
+                    message,
+                    &source,
+                    turn.config.multi_agent_v2.message_delivery,
+                ),
                 mode: MessageDeliveryMode::TriggerTurn,
             },
             source: spawn_source,
