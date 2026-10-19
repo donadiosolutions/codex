@@ -43,12 +43,14 @@ if [[ "${1:-}" == --build ]]; then
   export SCCACHE_CACHE_SIZE=20G
   export SCCACHE_SERVER_PORT=4227
   export SCCACHE_IDLE_TIMEOUT=14400
-  export CARGO_PROFILE_RELEASE_DEBUG=full
-  export CARGO_PROFILE_RELEASE_STRIP=none
+  export CARGO_PROFILE_RELEASE_DEBUG=0
+  export CARGO_PROFILE_RELEASE_STRIP=symbols
   export CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off
   build_dir=/src
   source_code_sha="$actual_commit"
-  export RUSTFLAGS='-Z min-recursion-limit=256 -C target-cpu=skylake-avx512 -C debuginfo=full -C strip=none -C split-debuginfo=off -C dwarf-version=5 -C force-frame-pointers=yes'
+  export RUSTFLAGS='-Z min-recursion-limit=256 -C target-cpu=skylake-avx512 -C debuginfo=0 -C strip=symbols -C split-debuginfo=off -C force-frame-pointers=yes'
+  export CFLAGS="${CFLAGS:+$CFLAGS }-g0"
+  export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-g0"
   export LC_ALL=C
   trap 'status=$?; trap - EXIT; sccache --show-stats --stats-format json > /bench/sccache-stats.json 2>/bench/sccache-stats-error.txt || true; sccache --stop-server > /bench/sccache-shutdown.txt 2>&1 || true; exit "$status"' EXIT
 
@@ -205,15 +207,14 @@ PY
       echo "$binary contains a musl interpreter or dependency" >&2
       exit 1
     fi
+    strip --strip-all "$path"
     sections="$(readelf -SW "$path")"
     for section in .debug_info .debug_abbrev .debug_line .symtab; do
-      grep -Fq "$section" <<< "$sections" || { echo "$binary lacks $section" >&2; exit 1; }
+      if grep -Fq "$section" <<< "$sections"; then
+        echo "$binary retains $section after stripping" >&2
+        exit 1
+      fi
     done
-    timeout --kill-after=30s 5m readelf --debug-dump=info --dwarf-depth=1 "$path" > "/bench/$binary.dwarf-headers.txt"
-    grep -Eq 'Version: +5([[:space:]]|$)' "/bench/$binary.dwarf-headers.txt" || {
-      echo "$binary has no Rust compilation unit with DWARF version 5" >&2
-      exit 1
-    }
     install -m 0755 "$path" "/bench/raw/$binary"
     {
       printf 'Binary: %s\n' "$binary"
@@ -222,7 +223,7 @@ PY
       grep -E 'Class:|Machine:' <<< "$headers"
       grep -F 'Requesting program interpreter:' <<< "$program_headers"
       grep -F 'Shared library: [libc.so.6]' <<< "$dynamic"
-      printf 'DWARF 5: confirmed in at least one compilation unit\n'
+      printf 'Debug information and symbols: stripped\n'
     } > "/bench/$binary.build-details.txt"
   done
 
@@ -239,7 +240,7 @@ Cargo: $(/usr/bin/cargo --version)
 Fedora packages: matching Rust, Cargo and standard library $rust_version from signed Fedora 44 RPMs; DNF-resolved package versions
 Build: cargo build -Zbuild-std=std,panic_abort --locked --release --target x86_64-unknown-linux-gnu --jobs 16 -p codex-cli --bin codex -p codex-code-mode-host --bin codex-code-mode-host
 RUSTFLAGS: $RUSTFLAGS
-Release profile: optimized release; DEBUG=full, STRIP=none, SPLIT_DEBUGINFO=off
+Release profile: optimized release; DEBUG=0, STRIP=symbols, SPLIT_DEBUGINFO=off
 CPU requirement: x86-64 Skylake AVX-512 or newer with compatible AVX-512 support
 Rusty V8: prebuilt ptrcomp_sandbox_release archive and binding, verified against selected-source release manifest
 glibc: $(rpm -q glibc)
@@ -406,7 +407,7 @@ Source commit: $source_commit
 Target: x86_64-unknown-linux-gnu
 Compiler: $(awk -F': ' '/^Rust:/{print $2}' "$results/build-details.txt")
 CPU requirement: x86-64 Skylake AVX-512 or newer with compatible AVX-512 support
-Debug information: full Rust DWARF5, unstripped symbols, split debuginfo disabled
+Debug information: disabled for Rust and native compilation; debug sections and symbols stripped
 Native V8: verified prebuilt ptrcomp_sandbox_release archive and binding
 Compressor: $(cat "$results/zstd-version.txt")
 Compression flags: ${zstd_flags[*]}
