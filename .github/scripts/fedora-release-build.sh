@@ -45,13 +45,13 @@ if [[ "${1:-}" == --build ]]; then
   export SCCACHE_CACHE_SIZE=20G
   export SCCACHE_SERVER_PORT=4227
   export SCCACHE_IDLE_TIMEOUT=14400
-  export CARGO_PROFILE_RELEASE_DEBUG=full
-  export CARGO_PROFILE_RELEASE_STRIP=none
+  export CARGO_PROFILE_RELEASE_DEBUG=0
+  export CARGO_PROFILE_RELEASE_STRIP=symbols
   export CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off
   build_dir=/src
   source_code_sha="$actual_commit"
-  export RUSTFLAGS='-Z min-recursion-limit=256 -C target-cpu=skylake-avx512 -C debuginfo=full -C strip=none -C split-debuginfo=off -C dwarf-version=5 -C force-frame-pointers=yes'
-  export CFLAGS='-O3 -march=skylake-avx512 -g -gdwarf-5 -fno-omit-frame-pointer'
+  export RUSTFLAGS='-Z min-recursion-limit=256 -C target-cpu=skylake-avx512 -C debuginfo=0 -C strip=symbols -C split-debuginfo=off -C force-frame-pointers=yes'
+  export CFLAGS='-O3 -march=skylake-avx512 -g0 -fno-omit-frame-pointer'
   export CXXFLAGS="$CFLAGS"
   export LC_ALL=C
   trap 'status=$?; trap - EXIT; sccache --show-stats --stats-format json > /bench/sccache-stats.json 2>/bench/sccache-stats-error.txt || true; sccache --stop-server > /bench/sccache-shutdown.txt 2>&1 || true; exit "$status"' EXIT
@@ -193,6 +193,7 @@ PY
   /usr/bin/sccache --show-stats --stats-format json > /bench/sccache-before-build.json
   /usr/bin/cargo build -Zbuild-std=std,panic_abort --locked --release \
     --target "$target" --jobs 16 -p codex-bwrap --bin bwrap
+  strip --strip-all "$CARGO_TARGET_DIR/$target/release/bwrap"
   export CODEX_BWRAP_SHA256
   CODEX_BWRAP_SHA256="$(sha256sum "$CARGO_TARGET_DIR/$target/release/bwrap" | cut -d' ' -f1)"
   /usr/bin/cargo build -Zbuild-std=std,panic_abort --locked --release \
@@ -216,15 +217,13 @@ PY
       echo "$binary contains a musl interpreter or dependency" >&2
       exit 1
     fi
+    # bwrap was stripped before embedding its digest in codex.
+    if [[ "$binary" != bwrap ]]; then strip --strip-all "$path"; fi
     sections="$(readelf -SW "$path")"
-    for section in .debug_info .debug_abbrev .debug_line .symtab; do
-      grep -Fq "$section" <<< "$sections" || { echo "$binary lacks $section" >&2; exit 1; }
-    done
-    timeout --kill-after=30s 5m readelf --debug-dump=info --dwarf-depth=1 "$path" > "/bench/$binary.dwarf-headers.txt"
-    grep -Eq 'Version: +5([[:space:]]|$)' "/bench/$binary.dwarf-headers.txt" || {
-      echo "$binary has no Rust compilation unit with DWARF version 5" >&2
+    if grep -Eq '\.(debug_|zdebug_|symtab)' <<< "$sections"; then
+      echo "$binary retains debug information or a symbol table" >&2
       exit 1
-    }
+    fi
     install -m 0755 "$path" "/bench/raw/$binary"
     {
       printf 'Binary: %s\n' "$binary"
@@ -233,7 +232,7 @@ PY
       grep -E 'Class:|Machine:' <<< "$headers"
       grep -F 'Requesting program interpreter:' <<< "$program_headers"
       grep -F 'Shared library: [libc.so.6]' <<< "$dynamic"
-      printf 'DWARF 5: confirmed in at least one compilation unit\n'
+      printf 'Debug information and symbol table: stripped\n'
     } > "/bench/$binary.build-details.txt"
   done
 
@@ -427,7 +426,7 @@ Source commit: $source_commit
 Target: x86_64-unknown-linux-gnu
 Compiler: $(awk -F': ' '/^Rust:/{print $2}' "$results/build-details.txt")
 CPU requirement: x86-64 Skylake AVX-512 or newer with compatible AVX-512 support
-Debug information: full Rust DWARF5, unstripped symbols, split debuginfo disabled
+Debug information: disabled for Rust and C/C++; executable debug information and symbols stripped
 Native V8: verified prebuilt ptrcomp_sandbox_release archive and binding
 Compressor: $(cat "$results/zstd-version.txt")
 Compression flags: ${zstd_flags[*]}

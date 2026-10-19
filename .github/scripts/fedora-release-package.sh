@@ -34,7 +34,7 @@ assert text.count(needle) == 1, 'unsupported selected-source libffi configure re
 path.write_text(text.replace(needle, '"--disable-docs",\n                "--disable-multi-os-directory",\n                *configure_options,', 1))
 PYLIBFFI
   native_flags=()
-  for flag in -O3 -march=skylake-avx512 -g -gdwarf-5 -fno-omit-frame-pointer; do
+  for flag in -O3 -march=skylake-avx512 -g0 -fno-omit-frame-pointer; do
     native_flags+=("--c-flag=$flag" "--cxx-flag=$flag")
   done
   python3 /bench/voice-recipe/build_native.py --archives /bench/voice-archives \
@@ -95,7 +95,7 @@ PKG
     printf '%s  %s\n' 696b7d923b8071554d00e811afb9a08fcad4baada796f7314d12ecd72d06152c \
       "$zsh_workspace/$zsh_patch" | sha256sum --check -
   fi
-  # zsh defaults to linking with -s unless these variables are explicitly set.
+  # Apply stripping after all native executables are built, before hashing them.
   GITHUB_WORKSPACE="$zsh_workspace" RUNNER_TEMP=/bench ZSH_COMMIT="$zsh_commit" \
     ZSH_PATCH="$zsh_patch" ZSH_BUILD_JOBS=16 LDFLAGS='' EXELDFLAGS='' LIBLDFLAGS='' \
     bash /workflow/.github/scripts/build-zsh-release-artifact.sh /bench/zsh.tar.gz \
