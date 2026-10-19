@@ -220,7 +220,8 @@ PY
     # bwrap was stripped before embedding its digest in codex.
     if [[ "$binary" != bwrap ]]; then strip --strip-all "$path"; fi
     sections="$(readelf -SW "$path")"
-    if grep -Eq '\.(debug_|zdebug_|symtab)' <<< "$sections"; then
+    # Rust's allocated GDB autoload stub survives strip and is not DWARF data.
+    if grep -E '\.(debug_|zdebug_|symtab)' <<< "$sections" | grep -Ev '[[:space:]]\.debug_gdb_scripts[[:space:]]' > /dev/null; then
       echo "$binary retains debug information or a symbol table" >&2
       exit 1
     fi
